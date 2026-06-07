@@ -24,7 +24,7 @@ ways.
 
 | Scope | What it connects to | How it's configured |
 |---|---|---|
-| **Source** | A folder on disk containing `.TcPOU`/`.TcGVL`/`.TcDUT` files | `PROJECT_PATH` env var / `PlcProject:Root` config — set **once**, at server startup |
+| **Source** | A folder on disk containing `.TcPOU`/`.TcGVL`/`.TcDUT` files | Defaults to the server's current working directory (an MCP client launches it as a child process inheriting its own cwd) — override with `PROJECT_PATH` env var / `PlcProject:Root` config if needed |
 | **Runtime** | A running ADS target (a TwinCAT runtime, identified by AMS Net ID + port) | `Runtime:AmsNetId` / `Runtime:AmsPort` config — or passed per-call to the `connect_ads` tool |
 | **Automation** | An open XAE Shell solution (`.sln`/`.tsproj` file) | **Not config** — passed live to the `open_xae_project` tool by the agent during a session |
 
@@ -32,12 +32,20 @@ You can use any subset of these independently — e.g. point `PROJECT_PATH` at a
 project's source folder for browsing/editing, without ever touching ADS or the XAE
 Shell.
 
-### 1. Source scope — pointing `PROJECT_PATH` at your project
+### 1. Source scope — auto-detected from the working directory
 
-`PlcProjectIndex` recursively scans everything under `PROJECT_PATH` for
+By default the server indexes whatever's in **its own current working directory** —
+which an MCP client inherits when it launches the server as a child process. So if
+your client (Claude Desktop, Claude Code, etc.) launches `twincat-mcp` from (or
+pointed at) a folder that contains a PLC project, that project is indexed
+automatically. No path configuration needed.
+
+`PlcProjectIndex` recursively scans the resolved root for
 `*.TcPOU`/`*.TcGVL`/`*.TcDUT` files (`SearchOption.AllDirectories`), so it doesn't
-matter exactly which folder in the tree you point at — as long as your PLC source
-files live somewhere underneath it. A typical TwinCAT solution looks like:
+matter exactly which folder in the tree the cwd is — as long as your PLC source
+files live somewhere underneath it (and it's perfectly happy to find none, e.g. if
+you launch it from an unrelated directory — `list_plc_objects` just comes back
+empty). A typical TwinCAT solution looks like:
 
 ```
 MySolution/
@@ -53,14 +61,13 @@ MySolution/
         └── DUTs/
 ```
 
-Pointing `PROJECT_PATH` at `MySolution/PLC/MyPlcProject` (the PLC project folder
-itself) is the most precise — it indexes exactly the objects that belong to that
-PLC project. Pointing it at `MySolution` also works (it'll just walk a larger tree,
-including any other PLC projects in the same solution).
-
-`PROJECT_PATH` (or `PlcProject:Root`) is required — the server fails fast at
-startup if neither is set, so a missing/misconfigured path is never silently
-papered over.
+If cwd-based detection isn't right for your setup — e.g. the client always launches
+the server from some other directory — set `PROJECT_PATH` (env var) or
+`PlcProject:Root` (config) to override it explicitly. Pointing it at
+`MySolution/PLC/MyPlcProject` (the PLC project folder itself) is the most precise —
+it indexes exactly the objects that belong to that PLC project. Pointing it at
+`MySolution` also works (it'll just walk a larger tree, including any other PLC
+projects in the same solution).
 
 The index also runs a `FileSystemWatcher`, so edits made through the IDE while the
 server is running are picked up automatically — no restart needed to see them
@@ -108,28 +115,31 @@ reachable ADS target; the Source scope is portable. Running the whole server on 
 engineering workstation (alongside the installed XAE Shell, with a local/loopback
 runtime) is the natural fit for all three at once.
 
+The server is packaged as a standard **MCP server NuGet package** — the
+established way to distribute a local (stdio) .NET MCP server (see
+[NuGet's MCP server docs](https://learn.microsoft.com/en-us/nuget/concepts/nuget-mcp)
+and the manifest at [`.mcp/server.json`](.mcp/server.json)). Your MCP client
+launches it with **`dnx`** — the .NET-ecosystem equivalent of `npx`/`uvx` — which
+downloads and runs it in one shot, no SDK or source checkout required on the
+engineering workstation. `dnx` ships with the **.NET 10 SDK**.
+
 ### Prerequisites
-- **.NET 8 SDK**
+- **`dnx`** (ships with the .NET 10 SDK) to launch the published package — or the
+  **.NET 8 SDK** if you'd rather [build from source](#building-from-source-contributors)
 - **TwinCAT XAE Shell** installed locally, with a local or reachable PLC runtime
 
-### 1. Build
-```powershell
-dotnet build -c Release
-dotnet test -c Release      # 22 portable tests (Safety + Source) should pass anywhere
-```
-
-### 2. Find your COM ProgID (for the Automation scope)
+### 1. Find your COM ProgID (for the Automation scope)
 ```powershell
 reg query HKEY_CLASSES_ROOT /f "TcXaeShell.DTE" /k /s
 ```
 Use the exact version string this returns (e.g. `TcXaeShell.DTE.15.0`) for
 `Automation:DteProgId` — it varies by TwinCAT/Visual Studio version.
 
-### 3. Find your AMS Net ID (for the Runtime scope)
+### 2. Find your AMS Net ID (for the Runtime scope)
 Shown in the TwinCAT system tray icon, or `127.0.0.1.1.1` for a local loopback
 target. Port `851` is the standard PLC runtime port.
 
-### 4. Configure
+### 3. Configure
 Copy [`docs/claude-desktop-config.sample.json`](docs/claude-desktop-config.sample.json)
 into your MCP client's config and edit the `env` block:
 
@@ -137,10 +147,9 @@ into your MCP client's config and edit the `env` block:
 {
   "mcpServers": {
     "twincat": {
-      "command": "dotnet",
-      "args": ["run", "--project", "C:\\path\\to\\twincat-mcp\\src\\TwinCatMcp.Server", "-c", "Release"],
+      "command": "dnx",
+      "args": ["Adonuu.TwinCatMcp@0.1.0", "--yes"],
       "env": {
-        "PROJECT_PATH": "C:\\path\\to\\MySolution\\PLC\\MyPlcProject",
         "Runtime__AmsNetId": "127.0.0.1.1.1",
         "Runtime__AmsPort": "851",
         "Automation__DteProgId": "TcXaeShell.DTE.15.0",
@@ -152,6 +161,11 @@ into your MCP client's config and edit the `env` block:
 }
 ```
 
+Note there's no `PROJECT_PATH` here — the Source scope defaults to wherever your
+client launches the server from (see [Source scope](#1-source-scope--auto-detected-from-the-working-directory)
+above). Add `PROJECT_PATH`/`PlcProject:Root` to `env` only if that default isn't
+right for your setup.
+
 (Double underscores `__` are .NET configuration's standard way of expressing nested
 section keys — e.g. `Runtime__AmsNetId` binds to `RuntimeOptions.AmsNetId` under the
 `Runtime` config section.)
@@ -161,15 +175,61 @@ fully in this mode; only mutating operations are blocked. See
 [`docs/SAFETY.md`](docs/SAFETY.md) for the full policy model and a recommended
 staged rollout to enabling writes.
 
-### 5. Smoke-test with MCP Inspector before wiring up a real client
+### 4. Smoke-test with MCP Inspector before wiring up a real client
 ```powershell
-npx @modelcontextprotocol/inspector dotnet run --project src/TwinCatMcp.Server -c Release
+npx @modelcontextprotocol/inspector dnx Adonuu.TwinCatMcp@0.1.0 -- --yes
 ```
 Click through the tools interactively — particularly `connect_ads`, `get_plc_state`,
 `browse_symbols` (Runtime) and `open_xae_project`, `get_project_status`,
 `list_hardware_configurations` (Automation), since these need a real ADS target /
 XAE Shell to function and can't be exercised on a non-Windows dev machine.
 
-### 6. Wire it into your MCP client
+### 5. Wire it into your MCP client
 Merge the edited `mcpServers.twincat` entry into your client's config (e.g.
 `claude_desktop_config.json` for Claude Desktop) and restart the client.
+
+## Building from source (contributors)
+
+```powershell
+dotnet build -c Release
+dotnet test -c Release      # 22 portable tests (Safety + Source) should pass anywhere
+```
+
+To run the server straight from a checkout (e.g. while developing), point your MCP
+client at it directly instead of via `dnx`:
+
+```json
+{
+  "command": "dotnet",
+  "args": ["run", "--project", "C:\\path\\to\\twincat-mcp\\src\\TwinCatMcp.Server", "-c", "Release"]
+}
+```
+
+and likewise swap `dnx Adonuu.TwinCatMcp@0.1.0 -- --yes` for
+`dotnet run --project src/TwinCatMcp.Server -c Release` when smoke-testing with the
+MCP Inspector.
+
+## Publishing your own build
+
+The shipped `PackageId` (`Adonuu.TwinCatMcp`) is this repo's own; if you fork or
+rebrand, change `<PackageId>`/`<ToolCommandName>` in
+[`TwinCatMcp.Server.csproj`](src/TwinCatMcp.Server/TwinCatMcp.Server.csproj) and
+`name`/`packages[].identifier` in [`.mcp/server.json`](.mcp/server.json) to your own
+unique id first. Then, from a Windows machine (the package is built
+self-contained for `win-x64`):
+
+```powershell
+dotnet pack src/TwinCatMcp.Server -c Release
+# inspect src/TwinCatMcp.Server/bin/Release/*.nupkg, then:
+dotnet nuget push src/TwinCatMcp.Server/bin/Release/<YourPackageId>.<version>.nupkg `
+  --source https://api.nuget.org/v3/index.json --api-key <your-nuget-api-key>
+```
+
+This requires your own NuGet.org account and API key — publishing makes the package
+publicly resolvable via `dnx`/`dotnet tool install`, so it's worth confirming the
+package contents (`dotnet pack` output, or unzip the `.nupkg`) before pushing.
+
+## License
+
+[MIT](LICENSE) — use it, fork it, ship it, just keep the copyright notice. Provided
+"as is", with no warranty; see the [`LICENSE`](LICENSE) file for the full text.

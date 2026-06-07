@@ -58,33 +58,24 @@ var host = builder.Build();
 await host.RunAsync();
 
 /// <summary>
-/// Resolves the PLC project root to index from explicit config/env ("PlcProject:Root" or "PROJECT_PATH").
+/// Resolves the PLC project root to index: explicit config/env ("PlcProject:Root" or "PROJECT_PATH") wins;
+/// otherwise default to the current working directory. An MCP client launches this server as a child
+/// process inheriting its own cwd, so running the client from (or pointed at) a folder containing a PLC
+/// project is enough to have it indexed automatically — no per-machine path configuration required.
+/// <see cref="TwinCatMcp.Source.PlcProjectIndex"/> walks the tree it's given for PLC object files and is
+/// happy to find none, so defaulting to cwd is safe even when it isn't a PLC project.
 /// </summary>
 static string ResolveProjectRoot(IConfiguration configuration)
 {
     var configured = configuration["PlcProject:Root"] ?? configuration["PROJECT_PATH"];
-    if (!string.IsNullOrWhiteSpace(configured))
-        return configured;
-
-    throw new InvalidOperationException(
-        "No PLC project root configured — set 'PlcProject:Root' in appsettings.json or the PROJECT_PATH environment variable.");
+    return string.IsNullOrWhiteSpace(configured) ? Directory.GetCurrentDirectory() : configured;
 }
 
 /// <summary>
-/// Resolves the audit log path: explicit config wins; otherwise place it under the configured PLC project
-/// root so each project's audit trail travels with it, falling back to the working directory.
+/// Resolves the audit log path: explicit config wins; otherwise place it under the resolved PLC project
+/// root so each project's audit trail travels with it.
 /// </summary>
-static string ResolveAuditLogPath(IConfiguration configuration, SafetyOptions options)
-{
-    if (Path.IsPathRooted(options.AuditLogPath))
-        return options.AuditLogPath;
-
-    try
-    {
-        return Path.Combine(ResolveProjectRoot(configuration), options.AuditLogPath);
-    }
-    catch (InvalidOperationException)
-    {
-        return Path.GetFullPath(options.AuditLogPath);
-    }
-}
+static string ResolveAuditLogPath(IConfiguration configuration, SafetyOptions options) =>
+    Path.IsPathRooted(options.AuditLogPath)
+        ? options.AuditLogPath
+        : Path.Combine(ResolveProjectRoot(configuration), options.AuditLogPath);

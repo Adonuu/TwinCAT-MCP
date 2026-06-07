@@ -1,0 +1,74 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-10-17/server.schema.json",
+  "description": "MCP server for TwinCAT 3 — browse/edit PLC source, read/write live ADS variables, and drive the XAE Shell's build/automation interface (Windows-only).",
+  "name": "io.github.Adonuu/TwinCAT-MCP",
+  "version": "0.1.0",
+  "packages": [
+    {
+      "registryType": "nuget",
+      "registryBaseUrl": "https://api.nuget.org",
+      "identifier": "Adonuu.TwinCatMcp",
+      "version": "0.1.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [],
+      "environmentVariables": [
+        {
+          "name": "PROJECT_PATH",
+          "description": "Folder to index for PLC source (.TcPOU/.TcGVL/.TcDUT). Optional — defaults to the server process's current working directory, which an MCP client normally inherits from wherever it's running. Set this only to point somewhere other than that.",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "filepath"
+        },
+        {
+          "name": "Runtime__AmsNetId",
+          "description": "AMS Net ID of the default ADS target for the Runtime scope, e.g. '127.0.0.1.1.1' for a local loopback runtime. Optional — falls back to the local runtime when unset.",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "Runtime__AmsPort",
+          "description": "AMS port of the default ADS target — 851 is the standard TwinCAT 3 PLC runtime port.",
+          "isRequired": false,
+          "isSecret": false,
+          "default": "851",
+          "format": "number"
+        },
+        {
+          "name": "Automation__DteProgId",
+          "description": "COM ProgID of the installed XAE Shell's DTE object, e.g. 'TcXaeShell.DTE.15.0'. Varies by TwinCAT/Visual-Studio-shell version — check HKEY_CLASSES_ROOT on the engineering workstation. Required only for the Automation scope (open/build/automate an XAE project).",
+          "isRequired": false,
+          "isSecret": false,
+          "default": "TcXaeShell.DTE.15.0"
+        },
+        {
+          "name": "Automation__ShowIde",
+          "description": "Whether to make the XAE Shell window visible while the server drives it. Useful when developing/debugging; leave false otherwise.",
+          "isRequired": false,
+          "isSecret": false,
+          "default": "false"
+        },
+        {
+          "name": "Safety__SafeMode",
+          "description": "When true (the default, fail-closed), every mutating operation — source edits, symbol writes, runtime state changes, build/automation — is denied outright; read/browse/search tools remain fully available. See docs/SAFETY.md before turning this off.",
+          "isRequired": false,
+          "isSecret": false,
+          "default": "true"
+        },
+        {
+          "name": "Safety__AuditLogPath",
+          "description": "Append-only JSON-lines audit trail of every safety-gated operation attempted (allowed, denied, or pending confirmation). A relative path is resolved under the indexed PLC project root.",
+          "isRequired": false,
+          "isSecret": false,
+          "default": "twincat-mcp-audit.jsonl",
+          "format": "filepath"
+        }
+      ]
+    }
+  ],
+  "repository": {
+    "url": "https://github.com/Adonuu/TwinCAT-MCP",
+    "source": "github"
+  }
+}

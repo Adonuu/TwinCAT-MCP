@@ -12,11 +12,42 @@
     <PackageReference Include="ModelContextProtocol" Version="1.4.0" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Surfaces the MCP server manifest inside the package — see /.mcp/server.json and
+         https://learn.microsoft.com/en-us/nuget/concepts/nuget-mcp -->
+    <None Include="..\..\.mcp\server.json" Pack="true" PackagePath="/.mcp/" />
+    <None Include="..\..\README.md" Pack="true" PackagePath="/" />
+  </ItemGroup>
+
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net8.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <!--
+    Packaging as a .NET tool / MCP server NuGet package, the standard way to distribute a local
+    (stdio) .NET MCP server (see https://learn.microsoft.com/en-us/nuget/concepts/nuget-mcp). Once
+    published, an MCP client launches it with a single "dnx" command (no SDK or source checkout
+    required on the target machine). PackageId below is a placeholder; whoever
+    publishes this needs a NuGet.org account and a globally unique id (e.g. "username.TwinCatMcp").
+
+    Self-contained + win-x64-only: this server is Windows-only end to end (the Automation scope
+    drives the XAE Shell over COM — see XaeShellSession), so there's no reason to ship — or ask the
+    end user to provide a runtime for — any other platform.
+  -->
+  <PropertyGroup>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>twincat-mcp</ToolCommandName>
+    <PackageId>Adonuu.TwinCatMcp</PackageId>
+    <PackageType>McpServer</PackageType>
+    <Version>0.1.0</Version>
+    <Description>MCP server for TwinCAT 3 — browse/edit PLC source, read/write live ADS variables, and drive the XAE Shell's build/automation interface.</Description>
+    <PublishSelfContained>true</PublishSelfContained>
+    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
   </PropertyGroup>
 
 </Project>

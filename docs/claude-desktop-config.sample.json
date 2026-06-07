@@ -1,16 +1,12 @@
 {
   "mcpServers": {
     "twincat": {
-      "command": "dotnet",
+      "command": "dnx",
       "args": [
-        "run",
-        "--project",
-        "C:\\path\\to\\twincat-mcp\\src\\TwinCatMcp.Server",
-        "-c",
-        "Release"
+        "Adonuu.TwinCatMcp@0.1.0",
+        "--yes"
       ],
       "env": {
-        "PROJECT_PATH": "C:\\path\\to\\your\\TwinCAT\\PlcProject",
         "Runtime__AmsNetId": "127.0.0.1.1.1",
         "Runtime__AmsPort": "851",
         "Automation__DteProgId": "TcXaeShell.DTE.15.0",
