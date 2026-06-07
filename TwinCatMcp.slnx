@@ -1,0 +1,13 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/TwinCatMcp.Automation/TwinCatMcp.Automation.csproj" />
+    <Project Path="src/TwinCatMcp.Runtime/TwinCatMcp.Runtime.csproj" />
+    <Project Path="src/TwinCatMcp.Safety/TwinCatMcp.Safety.csproj" />
+    <Project Path="src/TwinCatMcp.Server/TwinCatMcp.Server.csproj" />
+    <Project Path="src/TwinCatMcp.Source/TwinCatMcp.Source.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/TwinCatMcp.Safety.Tests/TwinCatMcp.Safety.Tests.csproj" />
+    <Project Path="tests/TwinCatMcp.Source.Tests/TwinCatMcp.Source.Tests.csproj" />
+  </Folder>
+</Solution>
