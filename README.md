@@ -163,18 +163,47 @@ fully in this mode; only mutating operations are blocked. See
 [`docs/SAFETY.md`](docs/SAFETY.md) for the full policy model and a recommended
 staged rollout to enabling writes.
 
-### 3. Smoke-test with MCP Inspector before wiring up a real client
-```powershell
-npx @modelcontextprotocol/inspector dnx Adonuu.TwinCatMcp@0.1.0 -- --yes
-```
-Click through the tools interactively — particularly `connect_ads`, `get_plc_state`,
-`browse_symbols` (Runtime) and `open_xae_project`, `get_project_status`,
-`list_hardware_configurations` (Automation), since these need a real ADS target /
-XAE Shell to function and can't be exercised on a non-Windows dev machine.
+#### Claude Code
+Register it with the `claude mcp add` CLI (or hand-edit `.mcp.json` — same
+`mcpServers` JSON shape shown above):
 
-### 4. Wire it into your MCP client
-Merge the edited `mcpServers.twincat` entry into your client's config (e.g.
-`claude_desktop_config.json` for Claude Desktop) and restart the client.
+```bash
+claude mcp add --transport stdio \
+  --env Runtime__AmsNetId=127.0.0.1.1.1 \
+  --env Runtime__AmsPort=851 \
+  --env Safety__SafeMode=true \
+  twincat -- dnx Adonuu.TwinCatMcp@0.1.0 --yes
+```
+
+By default this writes to `~/.claude.json`; add `--scope project` to write a
+project-local `.mcp.json` instead. Claude Code has no `cwd` config field — the
+server simply inherits whatever directory you run `claude` from, so `cd` into your
+PLC project first (see [Source scope](#1-source-scope--always-the-working-directory)
+above).
+
+#### OpenCode
+Add an entry under `mcp` in `opencode.json` (project root, or
+`~/.config/opencode/opencode.json` for a global server):
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "twincat": {
+      "type": "local",
+      "command": ["dnx", "Adonuu.TwinCatMcp@0.1.0", "--yes"],
+      "environment": {
+        "Runtime__AmsNetId": "127.0.0.1.1.1",
+        "Runtime__AmsPort": "851",
+        "Safety__SafeMode": "true"
+      }
+    }
+  }
+}
+```
+
+Like Claude Code, OpenCode has no `cwd` field either — it launches the server from
+its own working directory, so run `opencode` from inside your PLC project.
 
 ## Building from source (contributors)
 
@@ -192,10 +221,6 @@ client at it directly instead of via `dnx`:
   "args": ["run", "--project", "C:\\path\\to\\twincat-mcp\\src\\TwinCatMcp.Server", "-c", "Release"]
 }
 ```
-
-and likewise swap `dnx Adonuu.TwinCatMcp@0.1.0 -- --yes` for
-`dotnet run --project src/TwinCatMcp.Server -c Release` when smoke-testing with the
-MCP Inspector.
 
 ## Publishing your own build
 
