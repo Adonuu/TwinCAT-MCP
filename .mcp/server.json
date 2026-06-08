@@ -15,13 +15,6 @@
       "packageArguments": [],
       "environmentVariables": [
         {
-          "name": "PROJECT_PATH",
-          "description": "Folder to index for PLC source (.TcPOU/.TcGVL/.TcDUT). Optional — defaults to the server process's current working directory, which an MCP client normally inherits from wherever it's running. Set this only to point somewhere other than that.",
-          "isRequired": false,
-          "isSecret": false,
-          "format": "filepath"
-        },
-        {
           "name": "Runtime__AmsNetId",
           "description": "AMS Net ID of the default ADS target for the Runtime scope, e.g. '127.0.0.1.1.1' for a local loopback runtime. Optional — falls back to the local runtime when unset.",
           "isRequired": false,
@@ -34,13 +27,6 @@
           "isSecret": false,
           "default": "851",
           "format": "number"
-        },
-        {
-          "name": "Automation__DteProgId",
-          "description": "COM ProgID of the installed XAE Shell's DTE object, e.g. 'TcXaeShell.DTE.15.0'. Varies by TwinCAT/Visual-Studio-shell version — check HKEY_CLASSES_ROOT on the engineering workstation. Required only for the Automation scope (open/build/automate an XAE project).",
-          "isRequired": false,
-          "isSecret": false,
-          "default": "TcXaeShell.DTE.15.0"
         },
         {
           "name": "Automation__ShowIde",

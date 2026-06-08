@@ -24,28 +24,29 @@ ways.
 
 | Scope | What it connects to | How it's configured |
 |---|---|---|
-| **Source** | A folder on disk containing `.TcPOU`/`.TcGVL`/`.TcDUT` files | Defaults to the server's current working directory (an MCP client launches it as a child process inheriting its own cwd) — override with `PROJECT_PATH` env var / `PlcProject:Root` config if needed |
+| **Source** | A folder on disk containing `.TcPOU`/`.TcGVL`/`.TcDUT` files | Always the server's current working directory — an MCP client launches it as a child process inheriting its own cwd, so there's nothing to configure |
 | **Runtime** | A running ADS target (a TwinCAT runtime, identified by AMS Net ID + port) | `Runtime:AmsNetId` / `Runtime:AmsPort` config — or passed per-call to the `connect_ads` tool |
 | **Automation** | An open XAE Shell solution (`.sln`/`.tsproj` file) | **Not config** — passed live to the `open_xae_project` tool by the agent during a session |
 
-You can use any subset of these independently — e.g. point `PROJECT_PATH` at a PLC
-project's source folder for browsing/editing, without ever touching ADS or the XAE
-Shell.
+You can use any subset of these independently — e.g. launch the server from inside a
+PLC project's source folder for browsing/editing, without ever touching ADS or the
+XAE Shell.
 
-### 1. Source scope — auto-detected from the working directory
+### 1. Source scope — always the working directory
 
-By default the server indexes whatever's in **its own current working directory** —
-which an MCP client inherits when it launches the server as a child process. So if
-your client (Claude Desktop, Claude Code, etc.) launches `twincat-mcp` from (or
-pointed at) a folder that contains a PLC project, that project is indexed
-automatically. No path configuration needed.
+The server indexes whatever's in **its own current working directory** — which an
+MCP client inherits when it launches the server as a child process. So if your
+client (Claude Desktop, Claude Code, etc.) launches `twincat-mcp` from (or pointed
+at, e.g. via a `cwd` setting) a folder that contains a PLC project, that project is
+indexed automatically. There is no path to configure — `PROJECT_PATH`/
+`PlcProject:Root` aren't options; wherever the server runs from *is* the project.
 
-`PlcProjectIndex` recursively scans the resolved root for
+`PlcProjectIndex` recursively scans the working directory for
 `*.TcPOU`/`*.TcGVL`/`*.TcDUT` files (`SearchOption.AllDirectories`), so it doesn't
-matter exactly which folder in the tree the cwd is — as long as your PLC source
-files live somewhere underneath it (and it's perfectly happy to find none, e.g. if
-you launch it from an unrelated directory — `list_plc_objects` just comes back
-empty). A typical TwinCAT solution looks like:
+matter exactly which folder in the tree you're in — as long as your PLC source files
+live somewhere underneath it (and it's perfectly happy to find none, e.g. if you
+launch it from an unrelated directory — `list_plc_objects` just comes back empty). A
+typical TwinCAT solution looks like:
 
 ```
 MySolution/
@@ -61,13 +62,10 @@ MySolution/
         └── DUTs/
 ```
 
-If cwd-based detection isn't right for your setup — e.g. the client always launches
-the server from some other directory — set `PROJECT_PATH` (env var) or
-`PlcProject:Root` (config) to override it explicitly. Pointing it at
-`MySolution/PLC/MyPlcProject` (the PLC project folder itself) is the most precise —
-it indexes exactly the objects that belong to that PLC project. Pointing it at
-`MySolution` also works (it'll just walk a larger tree, including any other PLC
-projects in the same solution).
+Running the server from `MySolution/PLC/MyPlcProject` (the PLC project folder
+itself) is the most precise — it indexes exactly the objects that belong to that PLC
+project. Running it from `MySolution` also works (it'll just walk a larger tree,
+including any other PLC projects in the same solution).
 
 The index also runs a `FileSystemWatcher`, so edits made through the IDE while the
 server is running are picked up automatically — no restart needed to see them
@@ -105,9 +103,6 @@ operate on it. `Automation:ShowIde` (default `false`) controls whether the shell
 window is visible while the agent drives it — handy to set `true` the first time so
 you can watch what it's doing.
 
-`Automation:DteProgId` must match what's actually registered on the machine — see
-step 3 of the setup below.
-
 ## Setup (Windows engineering workstation)
 
 The Automation scope is COM-based and Windows-only; the Runtime scope needs a
@@ -128,18 +123,11 @@ engineering workstation. `dnx` ships with the **.NET 10 SDK**.
   **.NET 8 SDK** if you'd rather [build from source](#building-from-source-contributors)
 - **TwinCAT XAE Shell** installed locally, with a local or reachable PLC runtime
 
-### 1. Find your COM ProgID (for the Automation scope)
-```powershell
-reg query HKEY_CLASSES_ROOT /f "TcXaeShell.DTE" /k /s
-```
-Use the exact version string this returns (e.g. `TcXaeShell.DTE.15.0`) for
-`Automation:DteProgId` — it varies by TwinCAT/Visual Studio version.
-
-### 2. Find your AMS Net ID (for the Runtime scope)
+### 1. Find your AMS Net ID (for the Runtime scope)
 Shown in the TwinCAT system tray icon, or `127.0.0.1.1.1` for a local loopback
 target. Port `851` is the standard PLC runtime port.
 
-### 3. Configure
+### 2. Configure
 Copy [`docs/claude-desktop-config.sample.json`](docs/claude-desktop-config.sample.json)
 into your MCP client's config and edit the `env` block:
 
@@ -152,7 +140,6 @@ into your MCP client's config and edit the `env` block:
       "env": {
         "Runtime__AmsNetId": "127.0.0.1.1.1",
         "Runtime__AmsPort": "851",
-        "Automation__DteProgId": "TcXaeShell.DTE.15.0",
         "Automation__ShowIde": "false",
         "Safety__SafeMode": "true"
       }
@@ -161,10 +148,11 @@ into your MCP client's config and edit the `env` block:
 }
 ```
 
-Note there's no `PROJECT_PATH` here — the Source scope defaults to wherever your
-client launches the server from (see [Source scope](#1-source-scope--auto-detected-from-the-working-directory)
-above). Add `PROJECT_PATH`/`PlcProject:Root` to `env` only if that default isn't
-right for your setup.
+Note there's no `PROJECT_PATH` here — that's not a thing the server reads. The
+Source scope is always whatever's in the working directory the client launches it
+from (see [Source scope](#1-source-scope--always-the-working-directory) above);
+point your client's `cwd`/working-directory setting at your PLC project if it isn't
+already there.
 
 (Double underscores `__` are .NET configuration's standard way of expressing nested
 section keys — e.g. `Runtime__AmsNetId` binds to `RuntimeOptions.AmsNetId` under the
@@ -175,7 +163,7 @@ fully in this mode; only mutating operations are blocked. See
 [`docs/SAFETY.md`](docs/SAFETY.md) for the full policy model and a recommended
 staged rollout to enabling writes.
 
-### 4. Smoke-test with MCP Inspector before wiring up a real client
+### 3. Smoke-test with MCP Inspector before wiring up a real client
 ```powershell
 npx @modelcontextprotocol/inspector dnx Adonuu.TwinCatMcp@0.1.0 -- --yes
 ```
@@ -184,7 +172,7 @@ Click through the tools interactively — particularly `connect_ads`, `get_plc_s
 `list_hardware_configurations` (Automation), since these need a real ADS target /
 XAE Shell to function and can't be exercised on a non-Windows dev machine.
 
-### 5. Wire it into your MCP client
+### 4. Wire it into your MCP client
 Merge the edited `mcpServers.twincat` entry into your client's config (e.g.
 `claude_desktop_config.json` for Claude Desktop) and restart the client.
 

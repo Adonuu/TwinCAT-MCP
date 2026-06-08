@@ -23,12 +23,12 @@ builder.Services.Configure<AutomationOptions>(builder.Configuration.GetSection(A
 
 // --- Cross-cutting safety (shared by Source/Runtime/Automation tools) ---
 builder.Services.AddSingleton(sp => new OperationAuditLog(
-    ResolveAuditLogPath(builder.Configuration, sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<SafetyOptions>>().Value),
+    ResolveAuditLogPath(sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<SafetyOptions>>().Value),
     sp.GetRequiredService<ILogger<OperationAuditLog>>()));
 builder.Services.AddSingleton<SafetyGate>();
 
 // --- Scope 1: file-based PLC source (portable, no TwinCAT dependency) ---
-builder.Services.AddSingleton(_ => new PlcProjectIndex(ResolveProjectRoot(builder.Configuration)));
+builder.Services.AddSingleton(_ => new PlcProjectIndex(ResolveProjectRoot()));
 
 // --- Scope 2: live runtime access via ADS ---
 builder.Services.AddSingleton<AdsConnectionManager>();
@@ -58,24 +58,20 @@ var host = builder.Build();
 await host.RunAsync();
 
 /// <summary>
-/// Resolves the PLC project root to index: explicit config/env ("PlcProject:Root" or "PROJECT_PATH") wins;
-/// otherwise default to the current working directory. An MCP client launches this server as a child
-/// process inheriting its own cwd, so running the client from (or pointed at) a folder containing a PLC
-/// project is enough to have it indexed automatically — no per-machine path configuration required.
-/// <see cref="TwinCatMcp.Source.PlcProjectIndex"/> walks the tree it's given for PLC object files and is
-/// happy to find none, so defaulting to cwd is safe even when it isn't a PLC project.
+/// The PLC project root to index is always the server process's current working directory. An MCP
+/// client launches this server as a child process inheriting its own cwd, so running the client from
+/// (or pointed at) a folder containing a PLC project is enough to have it indexed automatically — no
+/// path configuration of any kind, fixed or overridable. <see cref="TwinCatMcp.Source.PlcProjectIndex"/>
+/// walks the tree it's given for PLC object files and is happy to find none, so this is safe even when
+/// cwd isn't a PLC project.
 /// </summary>
-static string ResolveProjectRoot(IConfiguration configuration)
-{
-    var configured = configuration["PlcProject:Root"] ?? configuration["PROJECT_PATH"];
-    return string.IsNullOrWhiteSpace(configured) ? Directory.GetCurrentDirectory() : configured;
-}
+static string ResolveProjectRoot() => Directory.GetCurrentDirectory();
 
 /// <summary>
-/// Resolves the audit log path: explicit config wins; otherwise place it under the resolved PLC project
-/// root so each project's audit trail travels with it.
+/// Resolves the audit log path: explicit config wins; otherwise place it under the PLC project root so
+/// each project's audit trail travels with it.
 /// </summary>
-static string ResolveAuditLogPath(IConfiguration configuration, SafetyOptions options) =>
+static string ResolveAuditLogPath(SafetyOptions options) =>
     Path.IsPathRooted(options.AuditLogPath)
         ? options.AuditLogPath
-        : Path.Combine(ResolveProjectRoot(configuration), options.AuditLogPath);
+        : Path.Combine(ResolveProjectRoot(), options.AuditLogPath);

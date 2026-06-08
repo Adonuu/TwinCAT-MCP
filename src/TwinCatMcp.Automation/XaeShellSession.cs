@@ -2,6 +2,7 @@ using System.Runtime.InteropServices;
 using System.Xml.Linq;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Microsoft.Win32;
 using TwinCatMcp.Automation.Models;
 
 namespace TwinCatMcp.Automation;
@@ -395,18 +396,21 @@ public sealed class XaeShellSession : IAsyncDisposable
             return _dte;
 
         // Guarded at the RunAsync entry point by EnsureSupportedPlatform — every path that reaches here has
-        // already confirmed OperatingSystem.IsWindows(), so the platform-compatibility warning is a false positive.
+        // already confirmed OperatingSystem.IsWindows(), so the platform-compatibility warnings below are
+        // false positives (covers DiscoverDteProgId's registry access and Type.GetTypeFromProgID).
 #pragma warning disable CA1416
-        var type = Type.GetTypeFromProgID(_options.DteProgId)
-#pragma warning restore CA1416
+        var progId = DiscoverDteProgId()
             ?? throw new InvalidOperationException(
-                $"COM ProgID '{_options.DteProgId}' is not registered on this machine. " +
-                "Set Automation:DteProgId to match the TwinCAT XAE Shell version actually installed " +
-                "(check HKEY_CLASSES_ROOT for the exact 'TcXaeShell.DTE.<version>' entry).");
+                "No 'TcXaeShell.DTE.<version>' COM ProgID is registered on this machine — " +
+                "is the TwinCAT XAE Shell installed here? (Automation requires a local install; " +
+                "see HKEY_CLASSES_ROOT for 'TcXaeShell.DTE.*' entries to confirm.)");
 
-        _logger.LogInformation("Creating XAE Shell DTE instance via ProgID '{ProgId}'.", _options.DteProgId);
+        _logger.LogInformation("Creating XAE Shell DTE instance via auto-detected ProgID '{ProgId}'.", progId);
+        var type = Type.GetTypeFromProgID(progId)
+            ?? throw new InvalidOperationException($"Auto-detected COM ProgID '{progId}' resolved during discovery but not on re-lookup — this shouldn't happen.");
         dynamic dte = Activator.CreateInstance(type)
-            ?? throw new InvalidOperationException($"Activator.CreateInstance returned null for ProgID '{_options.DteProgId}'.");
+            ?? throw new InvalidOperationException($"Activator.CreateInstance returned null for ProgID '{progId}'.");
+#pragma warning restore CA1416
 
         // A freshly-launched Visual-Studio-based shell rejects its first several incoming calls with
         // RPC_E_CALL_REJECTED while it finishes its own startup and starts pumping messages — a long
@@ -417,6 +421,28 @@ public sealed class XaeShellSession : IAsyncDisposable
 
         _dte = dte;
         return _dte;
+    }
+
+    /// <summary>
+    /// Scans HKEY_CLASSES_ROOT for whatever 'TcXaeShell.DTE.&lt;version&gt;' COM ProgID is actually
+    /// registered on this machine. Beckhoff registers one such ProgID per installed XAE Shell
+    /// generation (e.g. "TcXaeShell.DTE.15.0" for VS2017-based shells) and the exact string varies
+    /// across TwinCAT versions — discovering it directly means a deployment never has to find and
+    /// configure it by hand. If more than one generation is installed side by side, the highest
+    /// version number is preferred as the most likely active one. Returns null if none is found.
+    ///
+    /// Only ever called from <see cref="GetOrCreateDte"/>, which every caller reaches through
+    /// <c>RunAsync</c> → <c>EnsureSupportedPlatform</c> — so the registry/COM access here is always
+    /// on Windows, making the platform-compatibility warnings below false positives.
+    /// </summary>
+    private static string? DiscoverDteProgId()
+    {
+#pragma warning disable CA1416
+        return Registry.ClassesRoot.GetSubKeyNames()
+            .Where(name => name.StartsWith("TcXaeShell.DTE.", StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(name => Version.TryParse(name["TcXaeShell.DTE.".Length..], out var version) ? version : new Version(0, 0))
+            .FirstOrDefault(name => Type.GetTypeFromProgID(name) is not null);
+#pragma warning restore CA1416
     }
 
     private const int RpcECallRejected = unchecked((int)0x80010001);

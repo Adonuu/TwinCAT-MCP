@@ -9,7 +9,6 @@
       "env": {
         "Runtime__AmsNetId": "127.0.0.1.1.1",
         "Runtime__AmsPort": "851",
-        "Automation__DteProgId": "TcXaeShell.DTE.15.0",
         "Automation__ShowIde": "false",
         "Safety__SafeMode": "true",
         "Safety__AuditLogPath": "twincat-mcp-audit.jsonl"
