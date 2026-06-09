@@ -23,7 +23,7 @@ jobs:
       - name: Pack
         run: >
           dotnet pack src/TwinCatMcp.Server/TwinCatMcp.Server.csproj
-          --no-build -c Release
+          --no-restore -c Release
           -p:Version=${{ steps.version.outputs.VERSION }}
           -o nupkgs
       - name: NuGet login
