@@ -32,6 +32,7 @@ jobs:
         with:
           user: ${{ secrets.NUGET_USER }}
       - name: Push to NuGet.org
+        shell: bash
         run: >
           dotnet nuget push nupkgs/*.nupkg
           --api-key ${{ steps.login.outputs.NUGET_API_KEY }}
