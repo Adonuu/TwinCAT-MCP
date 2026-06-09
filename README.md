@@ -11,6 +11,25 @@ TwinCAT 3 PLC project across three independent scopes:
    clean a project, read build errors, activate hardware configs, restart the
    runtime. Windows-only, requires a local TwinCAT XAE Shell install.
 
+## What you can ask it to do
+
+A few examples of the kind of thing an agent can do once connected, one per scope:
+
+- **Source**: "Find the POU that handles recipe validation and show me its
+  implementation" — the agent searches and reads source across POUs/GVLs/DUTs
+  on disk, and (with writes enabled) can edit declarations/implementations or
+  scaffold new objects.
+- **Runtime**: "What's the current value of the active recipe struct, and let
+  me know if `MAIN.fbConveyor.eState` changes" — the agent reads/browses live
+  ADS symbols and subscribes to value-change notifications, polling for samples
+  as they arrive.
+- **Automation**: "Build the project and show me any errors" — the agent drives
+  the XAE Shell to build/clean and reports back the resulting error list.
+
+Anything that changes state — symbol writes, run-state transitions, builds,
+restarts — goes through the safety policy described next, so these stay safe to
+explore even with writes enabled.
+
 Every operation that changes anything — source edits, symbol writes, state
 transitions, builds, restarts — is gated by a central safety policy with
 `SafeMode`/allow-lists/`dryRun`/`confirm` and an append-only audit log. See
