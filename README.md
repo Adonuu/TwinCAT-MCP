@@ -42,17 +42,9 @@ reachable ADS target; the Source scope is portable. Running the whole server on 
 engineering workstation (alongside the installed XAE Shell, with a local/loopback
 runtime) is the natural fit for all three at once.
 
-The server is packaged as a standard **MCP server NuGet package** — the
-established way to distribute a local (stdio) .NET MCP server (see
-[NuGet's MCP server docs](https://learn.microsoft.com/en-us/nuget/concepts/nuget-mcp)
-and the manifest at [`.mcp/server.json`](.mcp/server.json)). Your MCP client
-launches it with **`dnx`** — the .NET-ecosystem equivalent of `npx`/`uvx` — which
-downloads and runs it in one shot, no SDK or source checkout required on the
-engineering workstation. `dnx` ships with the **.NET 10 SDK**.
+> **Windows only** — the package is built self-contained for `win-x64`. The Automation scope requires TwinCAT XAE Shell (COM/Windows), and the Runtime scope requires a reachable ADS target.
 
 ### Prerequisites
-- **`dnx`** (ships with the .NET 10 SDK) to launch the published package — or the
-  **.NET 8 SDK** if you'd rather [build from source](#building-from-source-contributors)
 - **TwinCAT XAE Shell** installed locally, with a local or reachable PLC runtime
 
 ### 1. Find your AMS Net ID (for the Runtime scope)
@@ -79,10 +71,6 @@ into your MCP client's config and edit the `env` block:
   }
 }
 ```
-
-(Double underscores `__` are .NET configuration's standard way of expressing nested
-section keys — e.g. `Runtime__AmsNetId` binds to `RuntimeOptions.AmsNetId` under the
-`Runtime` config section.)
 
 Leave `Safety__SafeMode` as `true` to start — every read/browse/search tool works
 fully in this mode; only mutating operations are blocked. See
@@ -124,43 +112,6 @@ Add an entry under `mcp` in `opencode.json` (project root, or
   }
 }
 ```
-
-## Building from source (contributors)
-
-```powershell
-dotnet build -c Release
-dotnet test -c Release      # 22 portable tests (Safety + Source) should pass anywhere
-```
-
-To run the server straight from a checkout (e.g. while developing), point your MCP
-client at it directly instead of via `dnx`:
-
-```json
-{
-  "command": "dotnet",
-  "args": ["run", "--project", "C:\\path\\to\\twincat-mcp\\src\\TwinCatMcp.Server", "-c", "Release"]
-}
-```
-
-## Publishing your own build
-
-The shipped `PackageId` (`Adonuu.TwinCatMcp`) is this repo's own; if you fork or
-rebrand, change `<PackageId>`/`<ToolCommandName>` in
-[`TwinCatMcp.Server.csproj`](src/TwinCatMcp.Server/TwinCatMcp.Server.csproj) and
-`name`/`packages[].identifier` in [`.mcp/server.json`](.mcp/server.json) to your own
-unique id first. Then, from a Windows machine (the package is built
-self-contained for `win-x64`):
-
-```powershell
-dotnet pack src/TwinCatMcp.Server -c Release
-# inspect src/TwinCatMcp.Server/bin/Release/*.nupkg, then:
-dotnet nuget push src/TwinCatMcp.Server/bin/Release/<YourPackageId>.<version>.nupkg `
-  --source https://api.nuget.org/v3/index.json --api-key <your-nuget-api-key>
-```
-
-This requires your own NuGet.org account and API key — publishing makes the package
-publicly resolvable via `dnx`/`dotnet tool install`, so it's worth confirming the
-package contents (`dotnet pack` output, or unzip the `.nupkg`) before pushing.
 
 ## License
 

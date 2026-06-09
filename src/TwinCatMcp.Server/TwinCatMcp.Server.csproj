@@ -42,7 +42,7 @@
     <ToolCommandName>twincat-mcp</ToolCommandName>
     <PackageId>Adonuu.TwinCatMcp</PackageId>
     <PackageType>McpServer</PackageType>
-    <Version>0.1.0</Version>
+    <Version>0.1.1</Version>
     <Description>MCP server for TwinCAT 3 — browse/edit PLC source, read/write live ADS variables, and drive the XAE Shell's build/automation interface.</Description>
     <PublishSelfContained>true</PublishSelfContained>
     <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
