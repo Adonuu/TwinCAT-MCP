@@ -14,7 +14,8 @@ gated — they remain fully available regardless of policy.
 ## Configuration (`Safety` section)
 
 Bind these from `appsettings.json`, environment variables (`Safety__SafeMode=true`, ...),
-or your MCP client's `env` block (see `claude-desktop-config.sample.json`).
+or your MCP client's `env` block (see the [Configure](../README.md#3-configure)
+section in the README).
 
 | Option | Default | Effect |
 |---|---|---|

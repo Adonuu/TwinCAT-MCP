@@ -51,67 +51,22 @@ runtime) is the natural fit for all three at once.
 Shown in the TwinCAT system tray icon, or `127.0.0.1.1.1` for a local loopback
 target. Port `851` is the standard PLC runtime port.
 
-### 2. Configure
-Copy [`docs/claude-desktop-config.sample.json`](docs/claude-desktop-config.sample.json)
-into your MCP client's config and edit the `env` block:
+### 2. Install
+Install the server as a .NET tool (see the
+[NuGet package](https://www.nuget.org/packages/Adonuu.TwinCatMcp) for the install
+command), which puts a `twincat-mcp` binary on your PATH.
 
-```json
-{
-  "mcpServers": {
-    "twincat": {
-      "command": "dnx",
-      "args": ["Adonuu.TwinCatMcp@0.1.0", "--yes"],
-      "env": {
-        "Runtime__AmsNetId": "127.0.0.1.1.1",
-        "Runtime__AmsPort": "851",
-        "Automation__ShowIde": "false",
-        "Safety__SafeMode": "true"
-      }
-    }
-  }
-}
+### 3. Configure
+
+#### Claude Code
+```bash
+claude mcp add-json twincat '{"type":"stdio","command":"twincat-mcp","env":{"Runtime__AmsNetId":"127.0.0.1.1.1","Runtime__AmsPort":"851","Safety__SafeMode":"true"}}'
 ```
 
 Leave `Safety__SafeMode` as `true` to start — every read/browse/search tool works
 fully in this mode; only mutating operations are blocked. See
 [`docs/SAFETY.md`](docs/SAFETY.md) for the full policy model and a recommended
 staged rollout to enabling writes.
-
-#### Claude Code
-Register it with the `claude mcp add` CLI (or hand-edit `.mcp.json` — same
-`mcpServers` JSON shape shown above):
-
-```bash
-claude mcp add --transport stdio \
-  --env Runtime__AmsNetId=127.0.0.1.1.1 \
-  --env Runtime__AmsPort=851 \
-  --env Safety__SafeMode=true \
-  twincat -- dnx Adonuu.TwinCatMcp@0.1.0 --yes
-```
-
-By default this writes to `~/.claude.json`; add `--scope project` to write a
-project-local `.mcp.json` instead.
-
-#### OpenCode
-Add an entry under `mcp` in `opencode.json` (project root, or
-`~/.config/opencode/opencode.json` for a global server):
-
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "mcp": {
-    "twincat": {
-      "type": "local",
-      "command": ["dnx", "Adonuu.TwinCatMcp@0.1.0", "--yes"],
-      "environment": {
-        "Runtime__AmsNetId": "127.0.0.1.1.1",
-        "Runtime__AmsPort": "851",
-        "Safety__SafeMode": "true"
-      }
-    }
-  }
-}
-```
 
 ## License
 
