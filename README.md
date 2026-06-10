@@ -60,7 +60,7 @@ command), which puts a `twincat-mcp` binary on your PATH.
 
 #### Claude Code
 ```bash
-claude mcp add-json twincat '{"type":"stdio","command":"twincat-mcp","env":{"Runtime__AmsNetId":"127.0.0.1.1.1","Runtime__AmsPort":"851","Safety__SafeMode":"true","Automation__ShowIde":"true"}}'
+claude mcp add twincat twincat-mcp --env Runtime__AmsNetId=127.0.0.1.1.1 --env Runtime__AmsPort=851 --env Safety__SafeMode=true --env Automation__ShowIde=true
 ```
 
 Leave `Safety__SafeMode` as `true` to start — every read/browse/search tool works
