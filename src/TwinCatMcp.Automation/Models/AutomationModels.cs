@@ -9,8 +9,8 @@ public sealed record BuildResult(bool Succeeded, int ErrorCount, int WarningCoun
 /// <summary>One build error/warning entry as reported by the IDE's error list.</summary>
 public sealed record BuildErrorInfo(string Severity, string Description, string? Project, string? FileName, int Line);
 
-/// <summary>One named hardware/PLC configuration available for activation.</summary>
-public sealed record HardwareConfiguration(string Name, bool IsActive);
+/// <summary>One I/O device under the project's "I/O Configuration^I/O Devices" ('TIID') tree node.</summary>
+public sealed record IoDevice(string Name, bool Enabled);
 
 /// <summary>Outcome of a gated automation operation — including the <see cref="TwinCatMcp.Safety.SafetyDecision"/> that gated it.</summary>
 public sealed record AutomationOperationResult(bool Applied, bool Succeeded, string? Error, string SafetyReason, string? Detail);

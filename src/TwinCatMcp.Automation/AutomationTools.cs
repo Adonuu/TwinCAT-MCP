@@ -69,16 +69,16 @@ public static class AutomationTools
     public static async Task<string> GetBuildErrors(XaeShellSession session, CancellationToken cancellationToken = default)
         => Serialize(await session.GetBuildErrorsAsync(cancellationToken));
 
-    [McpServerTool, Description("Lists the hardware/PLC configurations available in the open project's System Manager tree.")]
-    public static async Task<string> ListHardwareConfigurations(XaeShellSession session, CancellationToken cancellationToken = default)
-        => Serialize(await session.ListHardwareConfigurationsAsync(cancellationToken));
+    [McpServerTool, Description("Lists the I/O devices configured in the open project's 'I/O Configuration^I/O Devices' ('TIID') tree node, with their enabled/disabled state.")]
+    public static async Task<string> ListIoDevices(XaeShellSession session, CancellationToken cancellationToken = default)
+        => Serialize(await session.ListIoDevicesAsync(cancellationToken));
 
-    [McpServerTool, Description("Activates a named hardware/PLC configuration — this downloads the configuration to the target and can briefly interrupt a running system. " +
-        "High-impact: gated by the safety policy and always requires confirm=true. Pass dryRun=true to preview the decision.")]
+    [McpServerTool, Description("Activates the open project's current configuration (the IDE's 'Activate Configuration' / 'Save to Registry' command) — this downloads it to the " +
+        "target and can briefly interrupt a running system. There is no concept of multiple named configurations to choose between; this always activates the project as it " +
+        "currently stands. High-impact: gated by the safety policy and always requires confirm=true. Pass dryRun=true to preview the decision.")]
     public static async Task<string> ActivateConfiguration(
         XaeShellSession session,
         SafetyGate safety,
-        [Description("Name of the configuration to activate, as reported by ListHardwareConfigurations.")] string name,
         [Description("If true, evaluate the safety decision and report it without activating anything. Default false.")] bool dryRun = false,
         [Description("Required — activation is always gated behind explicit confirmation.")] bool confirm = false,
         CancellationToken cancellationToken = default)
@@ -87,15 +87,14 @@ public static class AutomationTools
         if (!decision.IsAllowed || dryRun)
             return Serialize(new AutomationOperationResult(Applied: false, Succeeded: false, Error: null, decision.Reason, Detail: null));
 
-        return Serialize(await session.ActivateConfigurationAsync(name, decision.Reason, cancellationToken));
+        return Serialize(await session.ActivateConfigurationAsync(decision.Reason, cancellationToken));
     }
 
-    [McpServerTool, Description("Restarts the TwinCAT runtime on the target — 'Restart' performs a full cold restart, 'ReloadOnly' just reloads the active configuration. " +
+    [McpServerTool, Description("Performs a full cold restart of the TwinCAT runtime on the target. " +
         "Highest-impact automation operation: it interrupts whatever the runtime is currently doing. Gated by the safety policy and always requires confirm=true.")]
     public static async Task<string> RestartTwinCat(
         XaeShellSession session,
         SafetyGate safety,
-        [Description("Restart mode: 'Restart' (full cold restart) or 'ReloadOnly' (reload active configuration). Default 'Restart'.")] string mode = "Restart",
         [Description("If true, evaluate the safety decision and report it without restarting anything. Default false.")] bool dryRun = false,
         [Description("Required — restarting is always gated behind explicit confirmation.")] bool confirm = false,
         CancellationToken cancellationToken = default)
@@ -104,7 +103,7 @@ public static class AutomationTools
         if (!decision.IsAllowed || dryRun)
             return Serialize(new AutomationOperationResult(Applied: false, Succeeded: false, Error: null, decision.Reason, Detail: null));
 
-        return Serialize(await session.RestartTwinCatAsync(mode, decision.Reason, cancellationToken));
+        return Serialize(await session.RestartTwinCatAsync(decision.Reason, cancellationToken));
     }
 
     [McpServerTool, Description("Browses the open project's PLC object tree (folders, POUs, GVLs, DUTs) starting from a tree path " +
