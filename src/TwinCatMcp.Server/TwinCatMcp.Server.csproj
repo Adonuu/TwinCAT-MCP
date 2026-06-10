@@ -48,6 +48,9 @@
     <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/Adonuu/TwinCAT-MCP</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/Adonuu/TwinCAT-MCP</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
   </PropertyGroup>
 
 </Project>
