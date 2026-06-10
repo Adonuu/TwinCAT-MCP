@@ -593,7 +593,7 @@ public sealed class XaeShellSession : IAsyncDisposable
     {
         var dispatch = (IDispatch)comObject;
         dispatch.GetTypeInfo(0, 0, out var typeInfo);
-        var dispId = FindDispId(typeInfo, memberName);
+        var dispId = FindDispId(ResolveDispatchTypeInfo(typeInfo), memberName);
 
         var argCount = args.Length;
         var variants = argCount > 0 ? Marshal.AllocHGlobal(VariantSize * argCount) : IntPtr.Zero;
@@ -615,6 +615,44 @@ public sealed class XaeShellSession : IAsyncDisposable
             if (variants != IntPtr.Zero)
                 Marshal.FreeHGlobal(variants);
         }
+    }
+
+    /// <summary>
+    /// Some COM objects' <c>IDispatch::GetTypeInfo(0, ...)</c> hands back the type info for their
+    /// <em>coclass</em> (e.g. <c>TcSysManager</c>) rather than the dispatch interface they actually expose
+    /// (<c>ITcSysManager3</c>) — a coclass's <c>TYPEATTR.cFuncs</c> is always 0 (it lists implemented
+    /// interfaces, not methods), which is why <see cref="FindDispId"/> would otherwise fail with "does not
+    /// declare a member" for every member. When that happens, walk the coclass's implemented interfaces
+    /// and use the default (non-source) one instead.
+    /// </summary>
+    private static ITypeInfo ResolveDispatchTypeInfo(ITypeInfo typeInfo)
+    {
+        typeInfo.GetTypeAttr(out var typeAttrPtr);
+        TYPEATTR typeAttr;
+        try
+        {
+            typeAttr = Marshal.PtrToStructure<TYPEATTR>(typeAttrPtr);
+        }
+        finally
+        {
+            typeInfo.ReleaseTypeAttr(typeAttrPtr);
+        }
+
+        if (typeAttr.typekind != TYPEKIND.TKIND_COCLASS)
+            return typeInfo;
+
+        for (var i = 0; i < typeAttr.cImplTypes; i++)
+        {
+            typeInfo.GetImplTypeFlags(i, out var flags);
+            if ((flags & IMPLTYPEFLAGS.IMPLTYPEFLAG_FDEFAULT) == 0 || (flags & IMPLTYPEFLAGS.IMPLTYPEFLAG_FSOURCE) != 0)
+                continue;
+
+            typeInfo.GetRefTypeOfImplType(i, out var href);
+            typeInfo.GetRefTypeInfo(href, out var implTypeInfo);
+            return implTypeInfo;
+        }
+
+        throw new InvalidOperationException("The COM object's coclass type info has no default incoming interface.");
     }
 
     private static int FindDispId(ITypeInfo typeInfo, string memberName)
