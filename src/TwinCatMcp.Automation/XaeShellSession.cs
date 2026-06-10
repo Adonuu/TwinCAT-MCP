@@ -419,6 +419,13 @@ public sealed class XaeShellSession : IAsyncDisposable
         _logger.LogInformation("Waiting for the XAE Shell to finish starting up...");
         RetryIfComBusy(() => { _ = (string)dte.Name; });
 
+        // A DTE created via Activator.CreateInstance starts in "automation controlled" mode: it stays
+        // invisible regardless of MainWindow.Visible and quits as soon as this process disconnects.
+        // Setting UserControl = true makes the shell behave like a normal interactively-launched
+        // instance — required for ShowIde to actually display the window.
+        if (_options.ShowIde)
+            dte.UserControl = true;
+
         _dte = dte;
         return _dte;
     }
