@@ -69,6 +69,14 @@ public sealed class SymbolBrowser
             Walk(child, prefix, depthRemaining - 1, results, maxResults);
     }
 
+    /// <summary>Finds a single symbol by its dotted instance path, or null if no such symbol exists.</summary>
+    public async Task<ISymbol?> FindSymbolAsync(string instancePath, CancellationToken ct)
+    {
+        var loader = await GetLoaderAsync(ct);
+        var symbols = (await loader.GetDynamicSymbolsAsync(ct)).Symbols ?? Enumerable.Empty<ISymbol>();
+        return FindByPath(symbols, instancePath);
+    }
+
     /// <summary>Describes one symbol's data type, including its members for struct/FB types.</summary>
     public async Task<SymbolInfo?> DescribeAsync(string instancePath, CancellationToken ct)
     {

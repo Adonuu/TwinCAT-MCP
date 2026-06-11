@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Text.Json;
 using ModelContextProtocol.Server;
 using TwinCAT.Ads;
+using TwinCAT.TypeSystem;
 using TwinCatMcp.Runtime.Models;
 using TwinCatMcp.Safety;
 
@@ -34,24 +35,22 @@ public static class RuntimeTools
     [McpServerTool, Description("Reads the current value of a single ADS symbol by its dotted instance path (e.g. 'MAIN.nCounter' or 'GVL_Globals.G_MAX_RETRIES'). " +
         "Returns the value as JSON — primitives map directly, structs/arrays come back as nested objects/arrays.")]
     public static async Task<string> ReadSymbol(
-        AdsConnectionManager connections,
+        SymbolBrowser browser,
         [Description("Dotted instance path of the symbol to read.")] string symbol,
         CancellationToken cancellationToken = default)
     {
-        var client = await connections.EnsureConnectedAsync(ct: cancellationToken);
-        return Serialize(await ReadOneAsync(client, symbol, cancellationToken));
+        return Serialize(await ReadOneAsync(browser, symbol, cancellationToken));
     }
 
     [McpServerTool, Description("Reads several ADS symbols in one call — convenient for grabbing a related group of variables (e.g. a recipe struct's fields) without round-tripping per symbol.")]
     public static async Task<string> ReadSymbolsBatch(
-        AdsConnectionManager connections,
+        SymbolBrowser browser,
         [Description("Dotted instance paths of the symbols to read.")] string[] symbols,
         CancellationToken cancellationToken = default)
     {
-        var client = await connections.EnsureConnectedAsync(ct: cancellationToken);
         var results = new List<SymbolReadResult>(symbols.Length);
         foreach (var symbol in symbols)
-            results.Add(await ReadOneAsync(client, symbol, cancellationToken));
+            results.Add(await ReadOneAsync(browser, symbol, cancellationToken));
 
         return Serialize(results);
     }
@@ -59,7 +58,7 @@ public static class RuntimeTools
     [McpServerTool, Description("Writes a value to a live ADS symbol. Gated by the safety policy (SafeMode, WritableSymbolPatterns, confirm) — " +
         "pass dryRun=true to see what the gate would decide without writing anything.")]
     public static async Task<string> WriteSymbol(
-        AdsConnectionManager connections,
+        SymbolBrowser browser,
         SafetyGate safety,
         [Description("Dotted instance path of the symbol to write.")] string symbol,
         [Description("The value to write. Primitives are passed directly; for structs/arrays pass a JSON object/array matching the symbol's shape.")] JsonElement value,
@@ -71,14 +70,13 @@ public static class RuntimeTools
         if (!decision.IsAllowed || dryRun)
             return Serialize(new SymbolWriteResult(symbol, Applied: false, Succeeded: false, Error: null, decision.Reason));
 
-        var client = await connections.EnsureConnectedAsync(ct: cancellationToken);
-        return Serialize(await WriteOneAsync(client, symbol, value, decision.Reason, cancellationToken));
+        return Serialize(await WriteOneAsync(browser, symbol, value, decision.Reason, cancellationToken));
     }
 
     [McpServerTool, Description("Writes several ADS symbols in one call, each gated independently by the safety policy. " +
         "Returns one result per write so partial application — and exactly why each write was allowed, denied, or needs confirmation — is visible.")]
     public static async Task<string> WriteSymbolsBatch(
-        AdsConnectionManager connections,
+        SymbolBrowser browser,
         SafetyGate safety,
         [Description("Writes to perform, each as {\"symbol\": \"<instance path>\", \"value\": <JSON value>}.")] SymbolWriteRequest[] writes,
         [Description("If true, evaluate every safety decision and report them without writing anything. Default false.")] bool dryRun = false,
@@ -86,7 +84,6 @@ public static class RuntimeTools
         CancellationToken cancellationToken = default)
     {
         var results = new List<SymbolWriteResult>(writes.Length);
-        AdsClient? client = null;
 
         foreach (var write in writes)
         {
@@ -97,8 +94,7 @@ public static class RuntimeTools
                 continue;
             }
 
-            client ??= await connections.EnsureConnectedAsync(ct: cancellationToken);
-            results.Add(await WriteOneAsync(client, write.Symbol, write.Value, decision.Reason, cancellationToken));
+            results.Add(await WriteOneAsync(browser, write.Symbol, write.Value, decision.Reason, cancellationToken));
         }
 
         return Serialize(results);
@@ -244,30 +240,37 @@ public static class RuntimeTools
     /// <summary>One write request within a <see cref="WriteSymbolsBatch"/> call.</summary>
     public sealed record SymbolWriteRequest(string Symbol, JsonElement Value);
 
-    private static async Task<SymbolReadResult> ReadOneAsync(AdsClient client, string symbol, CancellationToken ct)
+    private static async Task<SymbolReadResult> ReadOneAsync(SymbolBrowser browser, string symbol, CancellationToken ct)
     {
         try
         {
-            var result = await client.ReadAnyAsync(symbol, typeof(object), ct);
-            return result.Succeeded
-                ? new SymbolReadResult(symbol, true, result.Value, null)
-                : new SymbolReadResult(symbol, false, null, result.ErrorCode.ToString());
+            if (await browser.FindSymbolAsync(symbol, ct) is not IValueSymbol valueSymbol)
+                return new SymbolReadResult(symbol, false, null, $"Symbol '{symbol}' not found.");
+
+            var result = await valueSymbol.ReadValueAsync(ct);
+            return (AdsErrorCode)result.ErrorCode == AdsErrorCode.NoError
+                ? new SymbolReadResult(symbol, true, JsonSerializer.SerializeToElement(result.Value, Json), null)
+                : new SymbolReadResult(symbol, false, null, ((AdsErrorCode)result.ErrorCode).ToString());
         }
-        catch (AdsErrorException ex)
+        catch (Exception ex)
         {
             return new SymbolReadResult(symbol, false, null, ex.Message);
         }
     }
 
-    private static async Task<SymbolWriteResult> WriteOneAsync(AdsClient client, string symbol, JsonElement value, string safetyReason, CancellationToken ct)
+    private static async Task<SymbolWriteResult> WriteOneAsync(SymbolBrowser browser, string symbol, JsonElement value, string safetyReason, CancellationToken ct)
     {
         try
         {
+            if (await browser.FindSymbolAsync(symbol, ct) is not IValueSymbol valueSymbol)
+                return new SymbolWriteResult(symbol, Applied: false, Succeeded: false, $"Symbol '{symbol}' not found.", safetyReason);
+
             var clrValue = ToClrValue(value) ?? throw new ArgumentException($"Cannot write a null/undefined value to symbol '{symbol}'.");
-            var result = await client.WriteValueAsync(symbol, clrValue, ct);
-            return new SymbolWriteResult(symbol, Applied: true, result.Succeeded, result.Succeeded ? null : result.ErrorCode.ToString(), safetyReason);
+            var result = await valueSymbol.WriteValueAsync(clrValue, ct);
+            var ok = (AdsErrorCode)result.ErrorCode == AdsErrorCode.NoError;
+            return new SymbolWriteResult(symbol, Applied: true, ok, ok ? null : ((AdsErrorCode)result.ErrorCode).ToString(), safetyReason);
         }
-        catch (AdsErrorException ex)
+        catch (Exception ex)
         {
             return new SymbolWriteResult(symbol, Applied: true, Succeeded: false, ex.Message, safetyReason);
         }
