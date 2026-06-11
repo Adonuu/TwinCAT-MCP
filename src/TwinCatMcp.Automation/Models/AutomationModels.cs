@@ -20,8 +20,28 @@ public sealed record PlcTreeNode(string Name, string TreePath, string Kind, IRea
 
 /// <summary>
 /// Outcome of creating a new PLC object (POU/GVL/DUT/folder) directly in the project tree via the
-/// Automation Interface — unlike the file-based <c>CreatePou</c> tool, a successful creation here means
-/// the object is already registered with the IDE (correct GUID/.xti sync), so <see cref="TreePath"/> and
-/// <see cref="Guid"/> reflect the real, IDE-recognized object.
+/// Automation Interface — a successful creation here means the object is already registered with the
+/// IDE (correct GUID/.xti sync), so <see cref="TreePath"/> and <see cref="Guid"/> reflect the real,
+/// IDE-recognized object.
 /// </summary>
 public sealed record PlcObjectCreationResult(bool Applied, bool Succeeded, string? TreePath, string? Guid, string SafetyReason, string? Error);
+
+/// <summary>
+/// Result of resolving a tree path via LookupTreeItem without touching anything — used by mutation
+/// tools' dryRun mode so a caller can validate a path before committing to a real, gated call.
+/// </summary>
+public sealed record TreePathValidation(bool Exists, string? TreePath, string? Kind, string? Error);
+
+/// <summary>
+/// Declaration/implementation text of a PLC tree item, read live from the IDE's in-memory project —
+/// the source of truth while a session is open. <see cref="Implementation"/> is null for items that
+/// have no executable body (GVLs/DUTs are declaration-only).
+/// </summary>
+public sealed record PlcObjectCodeResult(bool Succeeded, string TreePath, string? Kind, string? Declaration, string? Implementation, string? Error);
+
+/// <summary>
+/// Outcome of writing declaration/implementation text through the Automation Interface.
+/// <see cref="PreviousText"/> carries the text as it was before the write (or, on dryRun, the current
+/// text) so every write is self-documenting and recoverable from the transcript.
+/// </summary>
+public sealed record PlcCodeWriteResult(bool Applied, bool Succeeded, string TreePath, string? PreviousText, string SafetyReason, string? Error);

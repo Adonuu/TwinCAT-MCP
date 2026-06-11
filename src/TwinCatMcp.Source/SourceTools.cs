@@ -11,13 +11,21 @@ namespace TwinCatMcp.Source;
 /// DUTs stored as XML on disk. Read/browse/search tools are always available; anything that writes a file
 /// is routed through <see cref="SafetyGate.CheckSourceEdit"/> first (see that type and <c>SAFETY.md</c> for
 /// the policy this enforces).
+///
+/// Division of labor with the Automation tools: these file-based tools are for <b>headless</b> work — no
+/// XAE Shell session holding the project. While a session is open (OpenXaeProject), the IDE caches
+/// documents in memory: disk reads can be stale against unsaved edits, and disk writes are invisible to
+/// the IDE and get overwritten on its next save. In that mode the Automation tools
+/// (GetProjectTree/ReadPlcObjectCode/WritePlcObjectDeclaration/WritePlcObjectImplementation) are the
+/// source of truth; the tool descriptions below steer agents accordingly.
 /// </summary>
 [McpServerToolType]
 public static class SourceTools
 {
     private static readonly JsonSerializerOptions Json = new() { WriteIndented = false };
 
-    [McpServerTool, Description("Lists POUs/GVLs/DUTs in the configured PLC project, optionally filtered by a name substring and/or object kind (Pou, Gvl, Dut).")]
+    [McpServerTool, Description("Lists POUs/GVLs/DUTs in the configured PLC project, optionally filtered by a name substring and/or object kind (Pou, Gvl, Dut). " +
+        "The index follows the solution opened via OpenXaeProject (else the server's working directory); while an XAE session is open, on-disk files can lag the IDE's unsaved state — prefer GetProjectTree there.")]
     public static string ListPlcObjects(
         PlcProjectIndex index,
         [Description("Case-insensitive substring to match against object names. Omit to list everything.")] string? namePattern = null,
@@ -34,7 +42,8 @@ public static class SourceTools
         return Serialize(objects.OrderBy(o => o.RelativePath, StringComparer.OrdinalIgnoreCase).ToArray());
     }
 
-    [McpServerTool, Description("Reads the full declaration (and, for POUs, implementation) source text of a PLC object, identified by name or GUID.")]
+    [McpServerTool, Description("Reads the full declaration (and, for POUs, implementation) source text of a PLC object, identified by name or GUID, from its file on disk. " +
+        "While an XAE session has the project open, the on-disk file can lag the IDE's unsaved state — prefer ReadPlcObjectCode there.")]
     public static string ReadPouSource(
         PlcProjectIndex index,
         [Description("The object's name (e.g. 'MAIN') or GUID (with or without braces).")] string nameOrGuid,
@@ -55,7 +64,8 @@ public static class SourceTools
         return Serialize(source);
     }
 
-    [McpServerTool, Description("Searches declaration and implementation source text across the project for a substring (or, optionally, a .NET regular expression) and returns matching lines with context.")]
+    [McpServerTool, Description("Searches declaration and implementation source text across the project for a substring (or, optionally, a .NET regular expression) and returns matching lines with context. " +
+        "Searches the files on disk — while an XAE session is open, results can lag the IDE's unsaved state.")]
     public static string SearchPlcSource(
         PlcProjectIndex index,
         [Description("Text to search for.")] string query,
@@ -90,7 +100,10 @@ public static class SourceTools
         return Serialize(hits);
     }
 
-    [McpServerTool, Description("Replaces the declaration block (the VAR.../END_VAR or TYPE.../END_TYPE text) of a PLC object. Gated by the safety policy — pass dryRun=true to preview the change without writing it.")]
+    [McpServerTool, Description("Replaces the declaration block (the VAR.../END_VAR or TYPE.../END_TYPE text) of a PLC object by editing its file on disk. " +
+        "WARNING: do NOT use this while the project is open in an XAE Shell session (OpenXaeProject) — the IDE caches documents in memory, so disk edits are " +
+        "invisible to it and will be overwritten on its next save; use WritePlcObjectDeclaration instead there. This file-based tool is for headless use (no IDE running). " +
+        "Gated by the safety policy — pass dryRun=true to preview the change without writing it.")]
     public static string WritePouDeclaration(
         PlcProjectIndex index,
         SafetyGate safety,
@@ -100,7 +113,10 @@ public static class SourceTools
         [Description("If true, compute and return the change without writing it. Default false.")] bool dryRun = false)
         => ApplyEdit(index, safety, nameOrGuid, ParseKind(kind), DeclarationEditor.Region.Declaration, newDeclarationText, dryRun);
 
-    [McpServerTool, Description("Replaces the implementation body (the executable ST code) of a POU. GVLs and DUTs have no implementation and will be rejected. Gated by the safety policy — pass dryRun=true to preview the change without writing it.")]
+    [McpServerTool, Description("Replaces the implementation body (the executable ST code) of a POU by editing its file on disk. GVLs and DUTs have no implementation and will be rejected. " +
+        "WARNING: do NOT use this while the project is open in an XAE Shell session (OpenXaeProject) — the IDE caches documents in memory, so disk edits are " +
+        "invisible to it and will be overwritten on its next save; use WritePlcObjectImplementation instead there. This file-based tool is for headless use (no IDE running). " +
+        "Gated by the safety policy — pass dryRun=true to preview the change without writing it.")]
     public static string WritePouImplementation(
         PlcProjectIndex index,
         SafetyGate safety,
@@ -109,48 +125,8 @@ public static class SourceTools
         [Description("If true, compute and return the change without writing it. Default false.")] bool dryRun = false)
         => ApplyEdit(index, safety, nameOrGuid, PlcObjectKind.Pou, DeclarationEditor.Region.Implementation, newImplementationText, dryRun);
 
-    [McpServerTool, Description("Creates a new POU/GVL/DUT skeleton file with a freshly-minted GUID under the given project-relative folder. " +
-        "IMPORTANT: this only writes the file to disk — it does NOT register the object in the .plcproj. If a project is open in the XAE Shell " +
-        "(see OpenXaeProject), prefer the CreatePlcObject automation tool instead: it creates AND registers the object through the IDE's own " +
-        "Automation Interface in one step, with correctly-synced GUIDs, so no manual 'Add Existing Item' step is needed. Use this file-based " +
-        "tool only for headless scenarios where no XAE Shell session is open. Gated by the safety policy — pass dryRun=true to preview without writing.")]
-    public static string CreatePou(
-        PlcProjectIndex index,
-        SafetyGate safety,
-        [Description("The new object's name (must be a valid IEC 61131-3 identifier).")] string name,
-        [Description("Project-relative folder to create the file in, e.g. 'POUs' or 'POUs/Generated'. Forward or back slashes both work.")] string folder,
-        [Description("Object kind: Pou, Gvl, or Dut.")] string kind,
-        [Description("If true, compute and return what would be created without writing it. Default false.")] bool dryRun = false)
-    {
-        var parsedKind = Enum.Parse<PlcObjectKind>(kind, ignoreCase: true);
-        var relativeFolder = folder.Replace('\\', '/').Trim('/');
-        var relativePath = string.IsNullOrEmpty(relativeFolder)
-            ? $"{name}{parsedKind.FileExtension()}"
-            : $"{relativeFolder}/{name}{parsedKind.FileExtension()}";
-
-        var decision = safety.CheckSourceEdit(relativePath, confirm: true);
-        if (!decision.IsAllowed)
-            return Serialize(new CreateResult(Created: false, relativePath, Guid: ""));
-
-        var fullPath = Path.Combine(index.ProjectRoot, relativePath.Replace('/', Path.DirectorySeparatorChar));
-        if (File.Exists(fullPath))
-            throw new InvalidOperationException($"A file already exists at '{relativePath}'.");
-
-        var guid = Guid.NewGuid();
-        if (dryRun)
-            return Serialize(new CreateResult(Created: false, relativePath, Guid: $"{{{guid}}}"));
-
-        var directory = Path.GetDirectoryName(fullPath);
-        if (!string.IsNullOrEmpty(directory))
-            Directory.CreateDirectory(directory);
-
-        File.WriteAllText(fullPath, PlcObjectTemplates.CreateSkeletonXml(parsedKind, name, guid), new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
-        index.Invalidate();
-
-        return Serialize(new CreateResult(Created: true, relativePath, Guid: $"{{{guid}}}"));
-    }
-
-    [McpServerTool, Description("Returns the project's POU/GVL/DUT objects grouped by folder, mirroring the on-disk layout of the PLC project tree.")]
+    [McpServerTool, Description("Returns the project's POU/GVL/DUT objects grouped by folder, mirroring the on-disk layout of the PLC project tree. " +
+        "While an XAE session is open, prefer GetProjectTree — it reflects the IDE's live tree, including unsaved structural changes.")]
     public static string GetProjectStructure(PlcProjectIndex index)
     {
         var tree = index.All()

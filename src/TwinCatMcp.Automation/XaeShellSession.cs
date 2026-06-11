@@ -40,14 +40,24 @@ public sealed class XaeShellSession : IAsyncDisposable
 
     public bool IsProjectOpen => _openProjectPath is not null;
 
+    /// <summary>
+    /// Raised (on the STA thread) with the opened solution's directory after a successful
+    /// <see cref="OpenProjectAsync"/> — lets the server re-point the file-based source index at the
+    /// project actually being worked on (wired up in Program.cs; Automation doesn't reference Source).
+    /// </summary>
+    public event Action<string>? ProjectOpened;
+
     public Task<ProjectInfo> OpenProjectAsync(string path, CancellationToken ct) =>
         RunAsync(() =>
         {
             var dte = GetOrCreateDte();
             dte.MainWindow.Visible = _options.ShowIde;
-            dte.Solution.Open(path);
+            RetryIfComBusy(() => dte.Solution.Open(path));
             _openProjectPath = path;
             _sysManager = null; // re-resolved lazily once a project is open — see GetOrCreateSysManager
+
+            if (Path.GetDirectoryName(Path.GetFullPath(path)) is { Length: > 0 } solutionDir)
+                ProjectOpened?.Invoke(solutionDir);
 
             string? fullName = TryGetString(() => (string)dte.Solution.FullName);
             return new ProjectInfo(Open: true, path, fullName);
@@ -58,7 +68,7 @@ public sealed class XaeShellSession : IAsyncDisposable
         {
             if (_dte is { } dte && _openProjectPath is { } path)
             {
-                dte.Solution.Close(SaveFirst: false);
+                RetryIfComBusy(() => dte.Solution.Close(SaveFirst: false));
                 var closed = new ProjectInfo(Open: false, path, FullName: null);
                 _openProjectPath = null;
                 _sysManager = null;
@@ -73,6 +83,26 @@ public sealed class XaeShellSession : IAsyncDisposable
             Open: _openProjectPath is not null,
             Path: _openProjectPath,
             FullName: _dte is { } dte && _openProjectPath is not null ? TryGetString(() => (string)dte.Solution.FullName) : null));
+
+    public Task<AutomationOperationResult> SaveAllAsync(string safetyReason, CancellationToken ct) =>
+        RunAsync(() =>
+        {
+            try
+            {
+                // Tree mutations (CreateChild/DeleteChild) update the IDE's in-memory project; the
+                // .plcproj/.tsproj on disk only follow on a save (builds and configuration
+                // activation save implicitly). Without an explicit save, CloseProject discards the
+                // structural changes while the created/deleted files on disk stay — leaving the
+                // project referencing deleted objects or orphaning new ones.
+                var dte = GetOrCreateDte();
+                RetryIfComBusy(() => dte.ExecuteCommand("File.SaveAll"));
+                return new AutomationOperationResult(Applied: true, Succeeded: true, Error: null, safetyReason, "Saved all open documents and project files.");
+            }
+            catch (Exception ex)
+            {
+                return new AutomationOperationResult(Applied: true, Succeeded: false, ex.Message, safetyReason, Detail: null);
+            }
+        });
 
     public Task<BuildResult> BuildAsync(string? configuration, CancellationToken ct) =>
         RunAsync(() => RunBuildOperation(build: true, configuration));
@@ -97,7 +127,7 @@ public sealed class XaeShellSession : IAsyncDisposable
             {
                 var ioDevices = new List<IoDevice>();
                 var root = ComInvoke(sysManager, "LookupTreeItem", "TIID")!;
-                var childCount = (int)ComGet(root, "ChildCount")!;
+                var childCount = Convert.ToInt32(ComGet(root, "ChildCount"));
                 for (var i = 1; i <= childCount; i++)
                 {
                     var child = ComGetIndexed(root, "Child", i)!;
@@ -177,7 +207,7 @@ public sealed class XaeShellSession : IAsyncDisposable
                 // returns, so any valid PathName reported by a previous browse can be passed back in.
                 var sysManager = GetOrCreateSysManager();
                 var root = ComInvoke(sysManager, "LookupTreeItem", string.IsNullOrWhiteSpace(treePath) ? "TIPC" : treePath)!;
-                return WalkTree(root, Math.Max(0, maxDepth));
+                return WalkTree(sysManager, root, Math.Max(0, maxDepth));
             }
             catch (Exception ex)
             {
@@ -187,7 +217,7 @@ public sealed class XaeShellSession : IAsyncDisposable
         });
 
     public Task<PlcObjectCreationResult> CreatePlcObjectAsync(
-        string parentTreePath, string name, string kind, string? pouType, string safetyReason, CancellationToken ct) =>
+        string parentTreePath, string name, string kind, string? pouType, string? returnType, string safetyReason, CancellationToken ct) =>
         RunAsync(() =>
         {
             try
@@ -195,13 +225,21 @@ public sealed class XaeShellSession : IAsyncDisposable
                 var subType = ResolveSubType(kind, pouType);
                 var parent = ComInvoke(GetOrCreateSysManager(), "LookupTreeItem", parentTreePath)!;
 
-                object vInfo = subType is SubTypeProgram or SubTypeFunction or SubTypeFunctionBlock
-                    ? IecLanguageStructuredText
-                    : 0;
+                // vInfo is CreateChild's optional VARIANT parameter, per Beckhoff's "Accessing,
+                // creating and handling PLC POUs" reference: the IEC implementation language for
+                // programs/function blocks; for functions a two-element array of [language, return
+                // type] — both required there; "not provided" (VT_EMPTY via null) for kinds that
+                // don't take one, where an explicit 0 could be misread as a language/template selector.
+                object? vInfo = subType switch
+                {
+                    SubTypeFunction => new object[] { IecLanguageStructuredText, returnType ?? "BOOL" },
+                    SubTypeProgram or SubTypeFunctionBlock => IecLanguageStructuredText,
+                    _ => null,
+                };
 
                 // A single CreateChild call both writes the file and registers it with the IDE
-                // (correct GUID/.xti sync) — this is the whole point of going through the Automation
-                // Interface instead of the file-based CreatePou tool (see SourceTools.CreatePou).
+                // (correct GUID/.xti sync) — which is why object creation goes through the
+                // Automation Interface rather than writing template files to disk.
                 var child = ComInvoke(parent, "CreateChild", name, subType, "", vInfo)!;
                 var newTreePath = TryGetString(() => (string)ComGet(child, "PathName")!) ?? $"{parentTreePath}^{name}";
                 var guid = TryGetGuidFromXml(child);
@@ -212,6 +250,90 @@ public sealed class XaeShellSession : IAsyncDisposable
             {
                 return new PlcObjectCreationResult(Applied: true, Succeeded: false, TreePath: null, Guid: null, safetyReason, ex.Message);
             }
+        });
+
+    /// <summary>
+    /// Resolves a tree path read-only (LookupTreeItem) and reports what it found — the COM error text
+    /// on a miss is surfaced verbatim, since it often hints at the valid sibling/parent names.
+    /// </summary>
+    public Task<TreePathValidation> ValidateTreePathAsync(string treePath, CancellationToken ct) =>
+        RunAsync(() =>
+        {
+            try
+            {
+                var item = ComInvoke(GetOrCreateSysManager(), "LookupTreeItem", treePath)!;
+                var resolvedPath = TryGetString(() => (string)ComGet(item, "PathName")!) ?? treePath;
+                var kind = DescribeSubType(TryGetInt(() => Convert.ToInt32(ComGet(item, "ItemSubType"))));
+                return new TreePathValidation(Exists: true, resolvedPath, kind, Error: null);
+            }
+            catch (Exception ex)
+            {
+                return new TreePathValidation(Exists: false, TreePath: null, Kind: null, ex.Message);
+            }
+        });
+
+    public Task<PlcObjectCodeResult> ReadPlcObjectCodeAsync(string treePath, CancellationToken ct) =>
+        RunAsync(() =>
+        {
+            try
+            {
+                var item = ComInvoke(GetOrCreateSysManager(), "LookupTreeItem", treePath)!;
+                var kind = DescribeSubType(TryGetInt(() => Convert.ToInt32(ComGet(item, "ItemSubType"))));
+
+                // The cast/'as' on the RCW is a QueryInterface — it decides what the item supports:
+                // POUs (and their method/property/action children) expose both aspects, GVLs/DUTs only
+                // the declaration, folders neither.
+                var declaration = item is ITcPlcDeclaration decl
+                    ? RetryIfComBusy(() => decl.DeclarationText) : null;
+                var implementation = item is ITcPlcImplementation impl
+                    ? RetryIfComBusy(() => impl.ImplementationText) : null;
+
+                if (declaration is null && implementation is null)
+                    return new PlcObjectCodeResult(Succeeded: false, treePath, kind, Declaration: null, Implementation: null,
+                        Error: $"'{treePath}' ({kind}) exposes neither a declaration nor an implementation — folders and non-IEC items have no code.");
+
+                return new PlcObjectCodeResult(Succeeded: true, treePath, kind, declaration, implementation, Error: null);
+            }
+            catch (Exception ex)
+            {
+                return new PlcObjectCodeResult(Succeeded: false, treePath, Kind: null, Declaration: null, Implementation: null, ex.Message);
+            }
+        });
+
+    public Task<PlcCodeWriteResult> WritePlcObjectCodeAsync(
+        string treePath, bool implementation, string newText, bool dryRun, string safetyReason, CancellationToken ct) =>
+        RunAsync(() =>
+        {
+            try
+            {
+                var item = ComInvoke(GetOrCreateSysManager(), "LookupTreeItem", treePath)!;
+                string previous;
+                if (!implementation)
+                {
+                    if (item is not ITcPlcDeclaration decl)
+                        return Fail($"'{treePath}' has no declaration part — is it a folder?");
+                    previous = RetryIfComBusy(() => decl.DeclarationText);
+                    if (!dryRun)
+                        RetryIfComBusy(() => decl.DeclarationText = newText);
+                }
+                else
+                {
+                    if (item is not ITcPlcImplementation impl)
+                        return Fail($"'{treePath}' has no implementation part — GVLs/DUTs/folders are declaration-only.");
+                    previous = RetryIfComBusy(() => impl.ImplementationText);
+                    if (!dryRun)
+                        RetryIfComBusy(() => impl.ImplementationText = newText);
+                }
+
+                return new PlcCodeWriteResult(Applied: !dryRun, Succeeded: true, treePath, previous, safetyReason, Error: null);
+            }
+            catch (Exception ex)
+            {
+                return Fail(ex.Message);
+            }
+
+            PlcCodeWriteResult Fail(string error) =>
+                new(Applied: false, Succeeded: false, treePath, PreviousText: null, safetyReason, error);
         });
 
     public Task<AutomationOperationResult> DeletePlcObjectAsync(string treePath, string safetyReason, CancellationToken ct) =>
@@ -239,12 +361,16 @@ public sealed class XaeShellSession : IAsyncDisposable
         {
             try
             {
-                // ITcSmTreeItem::ImportChild(bstrFile, bstrBefore = "", bReconnect = true, bstrName = "")
-                // — called on the parent item; the trailing optional arguments default per the type
-                // library when omitted, matching the Beckhoff sample `item.ImportChild("c:\...\box1.tce")`.
-                var parent = ComInvoke(GetOrCreateSysManager(), "LookupTreeItem", parentTreePath)!;
-                ComInvoke(parent, "ImportChild", exportFilePath);
-                return new AutomationOperationResult(Applied: true, Succeeded: true, Error: null, safetyReason, $"Imported '{exportFilePath}' into '{parentTreePath}'.");
+                // PLCopen XML import on the nested IEC project (see ExportPlcObjectAsync for why the
+                // PLCopen route). ITcPlcIECProject::PlcOpenImport(bstrFile, options, bstrSelection,
+                // bSubTree): options 0 = none (a name conflict fails instead of silently renaming),
+                // empty selection = everything in the file, bSubTree true = keep folder structure —
+                // imported objects land at the paths recorded in the file, relative to the project root.
+                var (projectPath, _) = SplitPlcProjectPath(parentTreePath);
+                var iecProject = ComInvoke(GetOrCreateSysManager(), "LookupTreeItem", projectPath)!;
+                ComInvoke(iecProject, "PlcOpenImport", exportFilePath, 0, "", true);
+                return new AutomationOperationResult(Applied: true, Succeeded: true, Error: null, safetyReason,
+                    $"Imported '{exportFilePath}' into PLC project '{projectPath}' (objects land at the paths recorded in the file).");
             }
             catch (Exception ex)
             {
@@ -258,19 +384,37 @@ public sealed class XaeShellSession : IAsyncDisposable
         {
             try
             {
-                // ITcSmTreeItem::ExportChild(name, file) — called on the parent item with the
-                // exported child's own name, per Beckhoff's Automation Interface.
-                var item = ComInvoke(GetOrCreateSysManager(), "LookupTreeItem", treePath)!;
-                var parent = ComGet(item, "Parent")!;
-                var itemName = (string)ComGet(item, "Name")!;
-                ComInvoke(parent, "ExportChild", itemName, exportFilePath);
-                return new AutomationOperationResult(Applied: true, Succeeded: true, Error: null, safetyReason, $"Exported '{treePath}' to '{exportFilePath}'.");
+                // PLC objects (POUs/GVLs/DUTs/folders) export as PLCopen XML via the nested IEC
+                // project's PlcOpenExport(bstrFile, bstrSelection) — ITcSmTreeItem::ExportChild is
+                // for whole-project zip archives (.tpzip) and rejects individual PLC items
+                // ("doesn't specify a zip archive", observed on TwinCAT.XAE.Automation.17.0).
+                // The selection is the item's path relative to the PLC project root in DOT notation
+                // (e.g. "MyFolder.FB_Sample"), not the caret notation tree paths use.
+                var (projectPath, relativePath) = SplitPlcProjectPath(treePath);
+                var iecProject = ComInvoke(GetOrCreateSysManager(), "LookupTreeItem", projectPath)!;
+                ComInvoke(iecProject, "PlcOpenExport", exportFilePath, relativePath.Replace('^', '.'));
+                return new AutomationOperationResult(Applied: true, Succeeded: true, Error: null, safetyReason, $"Exported '{treePath}' to '{exportFilePath}' (PLCopen XML).");
             }
             catch (Exception ex)
             {
                 return new AutomationOperationResult(Applied: true, Succeeded: false, ex.Message, safetyReason, Detail: null);
             }
         });
+
+    /// <summary>
+    /// Splits a PLC tree path into the nested IEC project node and the item path relative to it.
+    /// Tree paths look like "TIPC^&lt;PlcProject&gt;^&lt;PlcProject&gt; Project^Folder^Item" — the
+    /// first three segments address the nested project, the rest the item inside it.
+    /// </summary>
+    private static (string ProjectPath, string RelativePath) SplitPlcProjectPath(string treePath)
+    {
+        var segments = treePath.Split('^');
+        if (segments.Length < 3)
+            throw new ArgumentException(
+                $"'{treePath}' is not a path inside a PLC project — expected at least 'TIPC^<project>^<project> Project'.", nameof(treePath));
+
+        return (string.Join('^', segments[..3]), string.Join('^', segments[3..]));
+    }
 
     private static int ResolveSubType(string kind, string? pouType) => kind.Trim().ToLowerInvariant() switch
     {
@@ -287,29 +431,48 @@ public sealed class XaeShellSession : IAsyncDisposable
         _ => throw new ArgumentException($"Unknown object kind '{kind}'. Expected 'Folder', 'Pou', 'Gvl', or 'Dut'.", nameof(kind)),
     };
 
-    private static PlcTreeNode WalkTree(object item, int remainingDepth)
+    private static PlcTreeNode WalkTree(object sysManager, object item, int remainingDepth)
     {
+        // Convert.ToInt32 rather than a direct cast: numeric properties come back as whatever VARTYPE
+        // the shell chose (VT_I2 has been observed for ItemSubType) and unboxing a short as int throws.
         var name = TryGetString(() => (string)ComGet(item, "Name")!) ?? "(unknown)";
         var path = TryGetString(() => (string)ComGet(item, "PathName")!) ?? name;
-        var kind = DescribeSubType(TryGetInt(() => (int)ComGet(item, "ItemSubType")!));
+        var kind = DescribeSubType(TryGetInt(() => Convert.ToInt32(ComGet(item, "ItemSubType"))));
 
         IReadOnlyList<PlcTreeNode> children = [];
         if (remainingDepth > 0)
         {
-            var count = TryGetInt(() => (int)ComGet(item, "ChildCount")!);
-            if (count > 0)
+            var list = new List<PlcTreeNode>();
+            var count = TryGetInt(() => Convert.ToInt32(ComGet(item, "ChildCount")));
+            for (var i = 1; i <= count; i++)
             {
-                var list = new List<PlcTreeNode>(count);
-                for (var i = 1; i <= count; i++)
-                {
-                    var child = ComGetIndexed(item, "Child", i)!;
-                    list.Add(WalkTree(child, remainingDepth - 1));
-                }
-                children = list;
+                var child = ComGetIndexed(item, "Child", i)!;
+                list.Add(WalkTree(sysManager, child, remainingDepth - 1));
             }
+
+            // A PLC project node does NOT enumerate its nested IEC project — the node where
+            // POUs/GVLs/DUTs live and where CreatePlcObject parents belong — among its children
+            // (only '<name> Instance' shows up). Probe for it by Beckhoff's naming convention
+            // ('<path>^<name> Project') and graft it in, so browsing yields the tree paths the
+            // mutation tools actually accept instead of a dead end.
+            var nestedProjectPath = $"{path}^{name} Project";
+            if (!list.Any(c => string.Equals(c.TreePath, nestedProjectPath, StringComparison.OrdinalIgnoreCase))
+                && TryLookupTreeItem(sysManager, nestedProjectPath) is { } nestedProject)
+            {
+                list.Add(WalkTree(sysManager, nestedProject, remainingDepth - 1));
+            }
+
+            if (list.Count > 0)
+                children = list;
         }
 
         return new PlcTreeNode(name, path, kind, children);
+    }
+
+    private static object? TryLookupTreeItem(object sysManager, string treePath)
+    {
+        try { return ComInvoke(sysManager, "LookupTreeItem", treePath); }
+        catch { return null; } // a miss throws — absence is the expected answer for most nodes
     }
 
     private static string DescribeSubType(int subType) => subType switch
@@ -347,16 +510,24 @@ public sealed class XaeShellSession : IAsyncDisposable
         if (!string.IsNullOrWhiteSpace(configuration))
             solutionBuild.SolutionConfigurations.Item(configuration).Activate();
 
+        // Positional arguments: the wait parameter is named differently per method (Build's is
+        // 'WaitForBuildToFinish', Clean's is 'WaitForClean') and a wrong name surfaces as
+        // DISP_E_UNKNOWNNAME from the dynamic binder's named-parameter lookup.
         if (build)
-            solutionBuild.Build(WaitForBuildToFinish: true);
+            RetryIfComBusy(() => solutionBuild.Build(true));
         else
-            solutionBuild.Clean(WaitForBuildToFinish: true);
+            RetryIfComBusy(() => solutionBuild.Clean(true));
 
         var errors = ReadErrorList();
         var errorCount = errors.Count(e => string.Equals(e.Severity, "Error", StringComparison.OrdinalIgnoreCase));
         var warningCount = errors.Count(e => string.Equals(e.Severity, "Warning", StringComparison.OrdinalIgnoreCase));
 
-        return new BuildResult(Succeeded: errorCount == 0, errorCount, warningCount, errors);
+        // The error list is best-effort (not every shell exposes it — see ReadErrorList), so don't
+        // let an unreadable list masquerade as success: LastBuildInfo is the number of projects that
+        // failed in the last build and lives on the base SolutionBuild interface.
+        var failedProjects = TryGetInt(() => Convert.ToInt32(solutionBuild.LastBuildInfo));
+
+        return new BuildResult(Succeeded: errorCount == 0 && failedProjects == 0, errorCount, warningCount, errors);
     }
 
     private List<BuildErrorInfo> ReadErrorList()
@@ -367,7 +538,30 @@ public sealed class XaeShellSession : IAsyncDisposable
 
         try
         {
-            dynamic errorList = dte.ToolWindows.ErrorList;
+            // 'ToolWindows' lives on the DTE2 interface; some shells' DTE objects don't resolve it
+            // by name (observed on TcXaeShell.DTE.17.0). The Windows collection is on the base DTE
+            // interface, so go through it with the error list's well-known window kind GUID
+            // (EnvDTE80.WindowKinds.vsWindowKindErrorList). In a headless/automation-controlled
+            // shell that window may not exist yet — force-create it via the IDE command first.
+            const string vsWindowKindErrorList = "{D78612C7-9962-4B83-95D9-268046DAD23A}";
+            dynamic errorList;
+            try
+            {
+                errorList = dte.Windows.Item(vsWindowKindErrorList).Object;
+            }
+            catch
+            {
+                try
+                {
+                    dte.ExecuteCommand("View.ErrorList");
+                    errorList = dte.Windows.Item(vsWindowKindErrorList).Object;
+                }
+                catch
+                {
+                    errorList = dte.ToolWindows.ErrorList;
+                }
+            }
+
             dynamic items = errorList.ErrorItems;
             int count = items.Count;
 
@@ -433,6 +627,10 @@ public sealed class XaeShellSession : IAsyncDisposable
         if (_options.ShowIde)
             dte.UserControl = true;
 
+        // A modal dialog (license reminder, project-upgrade prompt, ...) would block the STA thread
+        // forever when nobody is watching the IDE — tell the shell to fail the operation instead.
+        try { dte.SuppressUI = !_options.ShowIde; } catch { /* not all shell versions expose it */ }
+
         _dte = dte;
         return _dte;
     }
@@ -472,14 +670,19 @@ public sealed class XaeShellSession : IAsyncDisposable
     /// (<paramref name="maxAttempts"/> × <paramref name="delayMs"/> ≈ 30s by default) to cover a slow
     /// IDE startup.
     /// </summary>
-    private static void RetryIfComBusy(Action action, int maxAttempts = 60, int delayMs = 500)
+    // 120 × 500ms ≈ 60s: enough to ride out not just IDE startup but also the post-restart window —
+    // after StartRestartTwinCAT the shell can keep rejecting calls for well over 30 seconds while it
+    // reconnects to the runtime.
+    private static void RetryIfComBusy(Action action, int maxAttempts = 120, int delayMs = 500) =>
+        RetryIfComBusy<object?>(() => { action(); return null; }, maxAttempts, delayMs);
+
+    private static T RetryIfComBusy<T>(Func<T> func, int maxAttempts = 120, int delayMs = 500)
     {
         for (var attempt = 1; ; attempt++)
         {
             try
             {
-                action();
-                return;
+                return func();
             }
             catch (COMException ex) when ((ex.HResult == RpcECallRejected || ex.HResult == RpcEServerCallRetryLater) && attempt < maxAttempts)
             {
@@ -498,13 +701,79 @@ public sealed class XaeShellSession : IAsyncDisposable
 
         var dte = GetOrCreateDte();
 
-        // The system manager is reached through the open project's "System" sub-item, cast to
-        // ITcSysManager via its automation object — this is the standard Beckhoff sample pattern.
-        dynamic project = dte.Solution.Projects.Item(1);
-        dynamic systemItem = project.ProjectItems.Item("SYSTEM");
-        _sysManager = (object)systemItem.Object;
-
+        // The whole resolution retries on COM-busy: right after Solution.Open the shell may still be
+        // loading the tsproj in the background and rejects calls — without the retry, a busy
+        // rejection inside the probe would be misread as "this project has no sys manager".
+        _sysManager = RetryIfComBusy(() => ResolveSysManager(dte));
         return _sysManager;
+    }
+
+    private static object ResolveSysManager(dynamic dte)
+    {
+        // Prefer the project whose file is the TwinCAT system project (.tsproj) — Projects.Item(1)
+        // alone would break the day the solution also contains a non-TwinCAT project.
+        dynamic projects = dte.Solution.Projects;
+        int projectCount = (int)projects.Count;
+        dynamic? tcProject = null;
+        for (var i = 1; i <= projectCount; i++)
+        {
+            dynamic candidate = projects.Item(i);
+            var fullName = TryGetString(() => (string)candidate.FullName);
+            if (fullName is not null && fullName.EndsWith(".tsproj", StringComparison.OrdinalIgnoreCase))
+            {
+                tcProject = candidate;
+                break;
+            }
+        }
+        tcProject ??= projects.Item(1);
+
+        // Beckhoff's documented Automation Interface pattern: the ITcSysManager IS the tsproj
+        // project's automation object — `sysMan = (ITcSysManager)project.Object` (InfoSys
+        // tc3_automationinterface, "Opening and activating existing configurations"). The legacy
+        // ProjectItems.Item("SYSTEM").Object route is undocumented but kept as a fallback; the
+        // LooksLikeSysManager probe lets whichever route yields a real sys manager self-select.
+        object? sysManager = null;
+        try { sysManager = (object)tcProject!.Object; } catch (Exception ex) when (!IsComBusy(ex)) { /* probe + fallback below */ }
+        if (sysManager is null || !LooksLikeSysManager(sysManager))
+            sysManager = TryGetSystemItemObject(tcProject!);
+
+        if (sysManager is null || !LooksLikeSysManager(sysManager))
+            throw new InvalidOperationException(
+                "Could not obtain ITcSysManager from the open project — neither project.Object nor the " +
+                "legacy SYSTEM project-item exposed an object with a 'LookupTreeItem' member. Is the open " +
+                "solution a TwinCAT XAE project?");
+
+        return sysManager;
+    }
+
+    private static bool IsComBusy(Exception ex) =>
+        ex.HResult is RpcECallRejected or RpcEServerCallRetryLater;
+
+    private static object? TryGetSystemItemObject(dynamic project)
+    {
+        try { return (object)project.ProjectItems.Item("SYSTEM").Object; }
+        catch (Exception ex) when (!IsComBusy(ex)) { return null; }
+    }
+
+    /// <summary>
+    /// Cheap sanity probe: resolves the DISPID of a known <c>ITcSysManager</c> member from the
+    /// candidate's own type info without invoking anything — distinguishes the real sys manager from
+    /// some other automation object (e.g. a plain tree item or VS project wrapper).
+    /// </summary>
+    private static bool LooksLikeSysManager(object candidate)
+    {
+        try
+        {
+            var dispatch = (IDispatch)candidate;
+            dispatch.GetTypeInfo(0, 0, out var typeInfo);
+            return TryFindDispId(ResolveDispatchTypeInfo(typeInfo), "LookupTreeItem", depth: 0, [], out _);
+        }
+        catch (Exception ex) when (!IsComBusy(ex))
+        {
+            // "Busy" must propagate to the caller's retry loop — swallowing it here would misread a
+            // still-loading shell as "this object is not the sys manager".
+            return false;
+        }
     }
 
     /// <summary>
@@ -526,7 +795,11 @@ public sealed class XaeShellSession : IAsyncDisposable
         // Not called directly — declared only to occupy IDispatch vtable slot 5 so Invoke lands on slot 6.
         void GetIDsOfNames(ref Guid riid, [In, MarshalAs(UnmanagedType.LPArray)] string[] names, int count, int lcid, [Out, MarshalAs(UnmanagedType.LPArray)] int[] dispIds);
 
-        void Invoke(int dispIdMember, ref Guid riid, int lcid, ushort flags, ref DISPPARAMS dispParams, out object? result, out EXCEPINFO excepInfo, out uint argErr);
+        // PreserveSig so a failing call still marshals the out EXCEPINFO back — with implicit HRESULT
+        // translation the CLR throws before excepInfo is readable, dropping the COM server's actual
+        // error text (bstrDescription). ComMember turns the raw HRESULT into a descriptive exception.
+        [PreserveSig]
+        int Invoke(int dispIdMember, ref Guid riid, int lcid, ushort flags, ref DISPPARAMS dispParams, out object? result, out EXCEPINFO excepInfo, out uint argErr);
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -552,24 +825,86 @@ public sealed class XaeShellSession : IAsyncDisposable
         public int scode;
     }
 
+    /// <summary>
+    /// <c>ITcPlcDeclaration</c> — the declaration-text aspect of a PLC tree item (POU/GVL/DUT, or a
+    /// method/property/action child item). Unlike <c>ITcSmTreeItem</c> (which is dual), this is a raw
+    /// IUnknown-derived oleautomation interface (verified against TCatSysManager.tlb 2.1), so the
+    /// <see cref="IDispatch"/>/<see cref="ComMember"/> plumbing cannot reach it — instead, casting the
+    /// tree-item RCW to this declaration performs a QueryInterface for the hardcoded IID and calls
+    /// straight through the vtable, exactly what Beckhoff's official TcatSysManagerLib interop does.
+    /// Member order MUST match the typelib's vtable order — a wrong order would silently call the
+    /// wrong slot (e.g. put where get sits).
+    /// </summary>
+    [ComImport]
+    [Guid("E937E819-2185-420D-91C0-3D8136FCC517")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface ITcPlcDeclaration
+    {
+        string DeclarationText
+        {
+            [return: MarshalAs(UnmanagedType.BStr)] get;
+            [param: MarshalAs(UnmanagedType.BStr)] set;
+        }
+    }
+
+    /// <summary>
+    /// <c>ITcPlcImplementation</c> — the implementation-text aspect of a PLC tree item. Same raw
+    /// IUnknown/QI-by-cast contract as <see cref="ITcPlcDeclaration"/>; GVLs/DUTs/folders fail the QI
+    /// (they have no executable body). <c>ImplementationXml</c> and <c>Language</c> are never called —
+    /// they are declared only to keep <c>ImplementationText</c>'s accessors on the correct vtable slots.
+    /// </summary>
+    [ComImport]
+    [Guid("1E70BCEE-A064-4A22-A408-9EA73954AF16")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface ITcPlcImplementation
+    {
+        string ImplementationText
+        {
+            [return: MarshalAs(UnmanagedType.BStr)] get;
+            [param: MarshalAs(UnmanagedType.BStr)] set;
+        }
+
+        string ImplementationXml
+        {
+            [return: MarshalAs(UnmanagedType.BStr)] get;
+            [param: MarshalAs(UnmanagedType.BStr)] set;
+        }
+
+        int Language { get; set; }
+    }
+
     [DllImport("oleaut32.dll")]
     private static extern void VariantClear(IntPtr pvarg);
 
     private const ushort DispatchMethod = 0x1;
     private const ushort DispatchPropertyGet = 0x2;
-    private const int VariantSize = 16; // sizeof(VARIANT) — fixed on both 32- and 64-bit.
+
+    // sizeof(VARIANT): 16 on 32-bit but 24 on 64-bit (8-byte vt/reserved header plus a union whose
+    // largest member, BRECORD, is two pointers). Marshal.GetNativeVariantForObject writes — and the
+    // callee reads rgvarg as an array with — full native VARIANTs, so the stride must match the
+    // process bitness; a 16-byte stride on x64 makes every call with 2+ arguments hand the COM server
+    // overlapping garbage variants (observed as "Specified OLE variant is invalid" / DISP_E errors).
+    private static readonly int VariantSize = IntPtr.Size == 8 ? 24 : 16;
+
+    private const int DispEException = unchecked((int)0x80020009);
+    private const int DispETypeMismatch = unchecked((int)0x80020005);
+    private const int DispEParamNotFound = unchecked((int)0x80020004);
 
     /// <summary>Invokes a method on an <c>ITcSysManager</c>/<c>ITcSmTreeItem</c> COM object by name.</summary>
     private static object? ComInvoke(object comObject, string methodName, params object?[] args) =>
         ComMember(comObject, methodName, DispatchMethod, args);
 
-    /// <summary>Reads a property on an <c>ITcSysManager</c>/<c>ITcSmTreeItem</c> COM object by name.</summary>
+    /// <summary>
+    /// Reads a property on an <c>ITcSysManager</c>/<c>ITcSmTreeItem</c> COM object by name. Passes
+    /// METHOD|PROPERTYGET together — the standard OLE Automation read idiom (what VB and the C#
+    /// dynamic binder send), since accessors are declared as INVOKE_FUNC in some typelib versions.
+    /// </summary>
     private static object? ComGet(object comObject, string propertyName) =>
-        ComMember(comObject, propertyName, DispatchPropertyGet, []);
+        ComMember(comObject, propertyName, DispatchMethod | DispatchPropertyGet, []);
 
     /// <summary>Reads an indexed property (e.g. <c>ITcSmTreeItem.Child[i]</c>) by name.</summary>
     private static object? ComGetIndexed(object comObject, string propertyName, int index) =>
-        ComMember(comObject, propertyName, DispatchPropertyGet, [index]);
+        ComMember(comObject, propertyName, DispatchMethod | DispatchPropertyGet, [index]);
 
     /// <summary>
     /// Invokes (or reads) a member on an <c>ITcSysManager</c>/<c>ITcSmTreeItem</c> COM object by DISPID,
@@ -589,7 +924,20 @@ public sealed class XaeShellSession : IAsyncDisposable
     /// failure mode.
     /// </summary>
 #pragma warning disable CA1416 // only ever reached via RunAsync -> EnsureSupportedPlatform on Windows
-    private static object? ComMember(object comObject, string memberName, ushort invokeFlags, object?[] args)
+    private static object? ComMember(object comObject, string memberName, ushort invokeFlags, object?[] args) =>
+        // The shell rejects incoming COM calls with RPC_E_CALL_REJECTED whenever it is busy — most
+        // notably while it is still loading a freshly-opened project in the background. A rejected
+        // call never started executing, so retrying is safe even for mutating members.
+        RetryIfComBusy(() => ComMemberCore(comObject, memberName, invokeFlags, args));
+
+    // If a *dispatch* property ever needs setting (e.g. ITcSmTreeItem.Comment/Disabled, which ARE on
+    // the dual interface), the shape is: invokeFlags = 0x4 (DISPATCH_PROPERTYPUT) and DISPPARAMS must
+    // carry the value as a named arg — allocate 4 bytes, write DISPID_PROPERTYPUT (-3) into it, set
+    // rgdispidNamedArgs to that pointer and cNamedArgs = 1. Do NOT use this for ITcPlcDeclaration/
+    // ITcPlcImplementation members: those interfaces are raw IUnknown (no dispinterface), and DISPIDs
+    // are interface-scoped — invoking a foreign DISPID against the default dispatch interface can
+    // silently hit an unrelated member. Use the [ComImport] cast route instead (see those interfaces).
+    private static object? ComMemberCore(object comObject, string memberName, ushort invokeFlags, object?[] args)
     {
         var dispatch = (IDispatch)comObject;
         dispatch.GetTypeInfo(0, 0, out var typeInfo);
@@ -599,13 +947,38 @@ public sealed class XaeShellSession : IAsyncDisposable
         var variants = argCount > 0 ? Marshal.AllocHGlobal(VariantSize * argCount) : IntPtr.Zero;
         try
         {
+            // Zero the whole buffer first so that if packing throws partway through, the finally
+            // block's VariantClear sees VT_EMPTY instead of uninitialized heap garbage.
+            for (var offset = 0; offset < VariantSize * argCount; offset += 8)
+                Marshal.WriteInt64(variants, offset, 0);
+
             // DISPPARAMS arguments are passed in reverse order.
             for (var i = 0; i < argCount; i++)
                 Marshal.GetNativeVariantForObject(args[argCount - 1 - i], variants + i * VariantSize);
 
             var dispParams = new DISPPARAMS { rgvarg = variants, rgdispidNamedArgs = IntPtr.Zero, cArgs = argCount, cNamedArgs = 0 };
             var iidNull = Guid.Empty;
-            dispatch.Invoke(dispId, ref iidNull, 0, invokeFlags, ref dispParams, out var result, out _, out _);
+            var hr = dispatch.Invoke(dispId, ref iidNull, 0, invokeFlags, ref dispParams, out var result, out var excepInfo, out var argErr);
+
+            if (hr == DispEException)
+            {
+                // The COM server filled EXCEPINFO with its own error report — surface it verbatim,
+                // since "Exception occurred (0x80020009)" alone is useless for diagnosing tool failures.
+                var code = excepInfo.scode != 0 ? excepInfo.scode : excepInfo.wCode;
+                throw new COMException(
+                    $"COM member '{memberName}' raised an error: {excepInfo.bstrDescription ?? "(no description provided)"} " +
+                    $"(source: {excepInfo.bstrSource ?? "unknown"}, code: 0x{code:X8})",
+                    code != 0 ? code : hr);
+            }
+
+            if (hr < 0)
+            {
+                var argHint = hr is DispETypeMismatch or DispEParamNotFound
+                    ? $" (argErr index {argErr}, counting from the last argument — rgvarg is reversed)"
+                    : ".";
+                throw new COMException($"COM member '{memberName}' failed with HRESULT 0x{hr:X8}{argHint}", hr);
+            }
+
             return result;
         }
         finally
@@ -657,11 +1030,38 @@ public sealed class XaeShellSession : IAsyncDisposable
 
     private static int FindDispId(ITypeInfo typeInfo, string memberName)
     {
+        var seen = new List<string>();
+        if (TryFindDispId(typeInfo, memberName, depth: 0, seen, out var dispId))
+            return dispId;
+
+        throw new InvalidOperationException(
+            $"The COM object's interface (and its base interfaces) do not declare a member named '{memberName}'. " +
+            $"Members found: {string.Join(", ", seen.Distinct())}.");
+    }
+
+    /// <summary>
+    /// TwinCAT's type library only declares each member on the interface generation that introduced
+    /// it: <c>CreateChild</c>/<c>DeleteChild</c>/... live on base <c>ITcSmTreeItem</c> and
+    /// <c>ActivateConfiguration</c>/<c>LookupTreeItem</c>/<c>StartRestartTwinCAT</c> on base
+    /// <c>ITcSysManager</c>, while the live objects describe themselves with the latest generation
+    /// (e.g. <c>ITcSmTreeItem10</c>, whose own TKIND_INTERFACE type info declares just
+    /// <c>PvSimulation</c>). TKIND_DISPATCH type infos flatten inherited members into cFuncs;
+    /// TKIND_INTERFACE ones do not — those expose their base via GetRefTypeOfImplType. So a member
+    /// missing at the current level must be looked up recursively through the base-interface chain.
+    /// </summary>
+    private static bool TryFindDispId(ITypeInfo typeInfo, string memberName, int depth, List<string> seen, out int dispId)
+    {
+        dispId = 0;
+        if (depth > 32) // defensive cap; real chains are ITcSysManager18 -> ... -> ITcSysManager -> IDispatch
+            return false;
+
         typeInfo.GetTypeAttr(out var typeAttrPtr);
-        int functionCount;
+        int functionCount, implTypeCount;
         try
         {
-            functionCount = Marshal.PtrToStructure<TYPEATTR>(typeAttrPtr).cFuncs;
+            var typeAttr = Marshal.PtrToStructure<TYPEATTR>(typeAttrPtr);
+            functionCount = typeAttr.cFuncs;
+            implTypeCount = typeAttr.cImplTypes;
         }
         finally
         {
@@ -675,8 +1075,14 @@ public sealed class XaeShellSession : IAsyncDisposable
             {
                 var funcDesc = Marshal.PtrToStructure<FUNCDESC>(funcDescPtr);
                 typeInfo.GetDocumentation(funcDesc.memid, out var name, out _, out _, out _);
-                if (string.Equals(name, memberName, StringComparison.Ordinal))
-                    return funcDesc.memid;
+                // Case-insensitive: COM name lookup (GetIDsOfNames) is case-insensitive, and Beckhoff's
+                // own casing varies (e.g. "StartRestartTwinCAT") — don't make casing a failure mode.
+                if (string.Equals(name, memberName, StringComparison.OrdinalIgnoreCase))
+                {
+                    dispId = funcDesc.memid;
+                    return true;
+                }
+                seen.Add(name);
             }
             finally
             {
@@ -684,7 +1090,15 @@ public sealed class XaeShellSession : IAsyncDisposable
             }
         }
 
-        throw new InvalidOperationException($"The COM object's interface does not declare a member named '{memberName}'.");
+        for (var i = 0; i < implTypeCount; i++)
+        {
+            typeInfo.GetRefTypeOfImplType(i, out var href);
+            typeInfo.GetRefTypeInfo(href, out var baseTypeInfo);
+            if (TryFindDispId(baseTypeInfo, memberName, depth + 1, seen, out dispId))
+                return true;
+        }
+
+        return false;
     }
 #pragma warning restore CA1416
 

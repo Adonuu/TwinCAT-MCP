@@ -33,8 +33,3 @@ public sealed record EditResult(
     string RelativePath,
     string? DiffPreview,
     IReadOnlyList<string> Warnings);
-
-public sealed record CreateResult(
-    bool Created,
-    string RelativePath,
-    string Guid);

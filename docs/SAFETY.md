@@ -24,7 +24,7 @@ section in the README).
 | `WritableSourcePathPatterns` | `[]` | Glob patterns matched against a PLC object's project-relative path (e.g. `POUs/Generated/*`). `write_pou_declaration`/`write_pou_implementation` only succeed for matching files. |
 | `AllowedStateTransitions` | `[]` | Explicit `"From->To"` pairs (e.g. `"Stop->Run"`). `set_plc_state` denies any transition not listed here, regardless of `SafeMode`. |
 | `AlwaysConfirmStateTransitions` | `true` | Even an allow-listed transition still requires the caller to re-invoke with `confirm=true`. |
-| `AlwaysConfirmAutomationOperations` | `["ActivateConfiguration", "RestartTwinCat"]` | Automation operation names that always require `confirm=true`, independent of `SafeMode`/allow-lists (build/clean/etc. are not allow-list-gated, but `SafeMode` still blocks them). |
+| `AlwaysConfirmAutomationOperations` | `["ActivateConfiguration", "RestartTwinCat", "DeletePlcObject", "WritePlcObjectDeclaration", "WritePlcObjectImplementation"]` | Automation operation names that always require `confirm=true`, independent of `SafeMode`/allow-lists (build/clean/etc. are not allow-list-gated, but `SafeMode` still blocks them). The code-write operations are listed because automation writes are not scoped by `WritableSourcePathPatterns` — confirmation is the only brake on them. |
 | `AuditLogPath` | `twincat-mcp-audit.jsonl` | Append-only JSON-lines audit trail. A relative path is resolved under the configured PLC project root (falling back to the working directory). |
 
 ## How a check resolves

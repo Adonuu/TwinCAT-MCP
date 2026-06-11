@@ -2,13 +2,13 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-10-17/server.schema.json",
   "description": "MCP server for TwinCAT 3 — browse/edit PLC source, read/write live ADS variables, and drive the XAE Shell's build/automation interface (Windows-only).",
   "name": "io.github.Adonuu/TwinCAT-MCP",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "packages": [
     {
       "registryType": "nuget",
       "registryBaseUrl": "https://api.nuget.org",
       "identifier": "Adonuu.TwinCatMcp",
-      "version": "0.1.0",
+      "version": "0.3.0",
       "transport": {
         "type": "stdio"
       },

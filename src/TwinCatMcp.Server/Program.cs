@@ -51,6 +51,27 @@ builder.Services
 
 var host = builder.Build();
 
+// When a solution is opened in the XAE Shell, re-point the file-based source index at its folder so
+// Source tools follow the project actually being worked on (until then they index the startup cwd —
+// see ResolveProjectRoot). Wired here because Automation deliberately doesn't reference Source.
+// Best-effort: a re-root failure must never break the COM open flow.
+{
+    var projectIndex = host.Services.GetRequiredService<PlcProjectIndex>();
+    var shellSession = host.Services.GetRequiredService<XaeShellSession>();
+    var startupLogger = host.Services.GetRequiredService<ILogger<Program>>();
+    shellSession.ProjectOpened += solutionDir =>
+    {
+        try
+        {
+            projectIndex.Reroot(solutionDir);
+        }
+        catch (Exception ex)
+        {
+            startupLogger.LogWarning(ex, "Could not re-root the PLC source index to '{SolutionDir}' — file-based tools keep indexing the previous root.", solutionDir);
+        }
+    };
+}
+
 // PlcProjectIndex/AdsConnectionManager/NotificationHub/XaeShellSession/StaThreadDispatcher are all
 // singletons implementing IDisposable/IAsyncDisposable — the host's root service provider disposes
 // them automatically (in reverse registration order) when it shuts down, so no manual lifecycle

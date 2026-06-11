@@ -17,8 +17,7 @@ A few examples of the kind of thing an agent can do once connected, one per scop
 
 - **Source**: "Find the POU that handles recipe validation and show me its
   implementation" — the agent searches and reads source across POUs/GVLs/DUTs
-  on disk, and (with writes enabled) can edit declarations/implementations or
-  scaffold new objects.
+  on disk, and (with writes enabled) can edit declarations/implementations.
 - **Runtime**: "What's the current value of the active recipe struct, and let
   me know if `MAIN.fbConveyor.eState` changes" — the agent reads/browses live
   ADS symbols and subscribes to value-change notifications, polling for samples

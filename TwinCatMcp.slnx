@@ -7,6 +7,7 @@
     <Project Path="src/TwinCatMcp.Source/TwinCatMcp.Source.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/TwinCatMcp.Automation.IntegrationTests/TwinCatMcp.Automation.IntegrationTests.csproj" />
     <Project Path="tests/TwinCatMcp.Safety.Tests/TwinCatMcp.Safety.Tests.csproj" />
     <Project Path="tests/TwinCatMcp.Source.Tests/TwinCatMcp.Source.Tests.csproj" />
   </Folder>

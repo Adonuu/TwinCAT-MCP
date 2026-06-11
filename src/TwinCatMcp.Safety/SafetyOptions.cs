@@ -52,8 +52,10 @@ public sealed class SafetyOptions
 
     /// <summary>
     /// Automation-interface operation names (e.g. "ActivateConfiguration", "RestartTwinCat") that always
-    /// require <c>confirm=true</c> even when automation operations are otherwise enabled.
+    /// require <c>confirm=true</c> even when automation operations are otherwise enabled. The code-write
+    /// operations are listed by default because, unlike file-based source edits, automation writes are not
+    /// scoped by <see cref="WritableSourcePathPatterns"/> — confirmation is the only brake on them.
     /// </summary>
     public List<string> AlwaysConfirmAutomationOperations { get; set; } =
-        ["ActivateConfiguration", "RestartTwinCat", "DeletePlcObject"];
+        ["ActivateConfiguration", "RestartTwinCat", "DeletePlcObject", "WritePlcObjectDeclaration", "WritePlcObjectImplementation"];
 }

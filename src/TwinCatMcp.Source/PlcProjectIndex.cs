@@ -13,7 +13,7 @@ public sealed class PlcProjectIndex : IDisposable
     private static readonly string[] WatchedExtensions =
         Enum.GetValues<PlcObjectKind>().Select(k => k.FileExtension()).ToArray();
 
-    private readonly string _projectRoot;
+    private volatile string _projectRoot;
     private readonly object _refreshLock = new();
     private FileSystemWatcher? _watcher;
     private ConcurrentDictionary<string, PlcObjectSummary> _byRelativePath = new();
@@ -69,6 +69,33 @@ public sealed class PlcProjectIndex : IDisposable
     public string ResolvePath(PlcObjectSummary summary) => Path.Combine(_projectRoot, summary.RelativePath);
 
     public void Invalidate() => _dirty = true;
+
+    /// <summary>
+    /// Re-points the index at a different project root — used when a solution is opened in the XAE
+    /// Shell, so the file-based tools follow the project actually being worked on instead of staying
+    /// on the process's startup working directory. No-op if the root is unchanged.
+    /// </summary>
+    public void Reroot(string projectRoot)
+    {
+        if (string.IsNullOrWhiteSpace(projectRoot))
+            throw new ArgumentException("Project root must not be empty.", nameof(projectRoot));
+
+        var newRoot = Path.GetFullPath(projectRoot);
+        if (!Directory.Exists(newRoot))
+            throw new DirectoryNotFoundException($"PLC project root not found: '{newRoot}'");
+
+        lock (_refreshLock)
+        {
+            if (string.Equals(newRoot, _projectRoot, StringComparison.OrdinalIgnoreCase))
+                return;
+
+            _watcher?.Dispose();
+            _watcher = null;
+            _projectRoot = newRoot;
+            TryStartWatcher();
+            _dirty = true;
+        }
+    }
 
     private void EnsureFresh()
     {
