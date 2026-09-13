@@ -5,17 +5,14 @@ public enum SafetyVerdict
     /// <summary>The operation may proceed.</summary>
     Allowed,
 
-    /// <summary>The operation is blocked by policy (SafeMode, an allow-list miss, or a disallowed transition).</summary>
+    /// <summary>The operation is blocked by policy (a safety toggle is off).</summary>
     Denied,
-
-    /// <summary>The operation would be allowed, but policy requires the caller to re-invoke with <c>confirm=true</c>.</summary>
-    RequiresConfirmation,
 }
 
 /// <summary>
 /// The outcome of a <see cref="SafetyGate"/> check, returned verbatim to the LLM in every mutating tool's
-/// result so both the agent and a human reviewing the transcript can see *why* something was allowed,
-/// blocked, or needs explicit confirmation — never a silent no-op.
+/// result so both the agent and a human reviewing the transcript can see *why* something was allowed or
+/// blocked — never a silent no-op.
 /// </summary>
 public sealed record SafetyDecision(SafetyVerdict Verdict, string Reason)
 {
@@ -23,5 +20,7 @@ public sealed record SafetyDecision(SafetyVerdict Verdict, string Reason)
 
     public static SafetyDecision Allow(string reason) => new(SafetyVerdict.Allowed, reason);
     public static SafetyDecision Deny(string reason) => new(SafetyVerdict.Denied, reason);
-    public static SafetyDecision NeedsConfirmation(string reason) => new(SafetyVerdict.RequiresConfirmation, reason);
 }
+
+/// <summary>Immutable snapshot of the three safety toggles, returned by <see cref="SafetyGate.Snapshot"/>.</summary>
+public sealed record SafetyToggleState(bool AllowAdsWrites, bool AllowDownloads, bool AllowRuntimeStateChanges);

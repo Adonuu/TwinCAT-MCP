@@ -12,8 +12,8 @@ public sealed record AuditEntry(
     string? Details);
 
 /// <summary>
-/// Append-only forensic record of every mutating operation a <see cref="SafetyGate"/> evaluated — allowed,
-/// denied, or pending confirmation — independent of whatever the LLM's own conversation log retains. Each
+/// Append-only forensic record of every mutating operation a <see cref="SafetyGate"/> evaluated — allowed
+/// or denied — independent of whatever the LLM's own conversation log retains. Each
 /// entry is a single JSON line, so the file stays greppable and diffable as it grows.
 ///
 /// Failures to write the log are logged but never thrown — an audit-trail outage must not be able to take

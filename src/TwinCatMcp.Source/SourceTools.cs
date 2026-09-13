@@ -154,7 +154,7 @@ public static class SourceTools
         bool dryRun)
     {
         var summary = ResolveSingle(index, nameOrGuid, kindHint);
-        var decision = safety.CheckSourceEdit(summary.RelativePath, confirm: true);
+        var decision = safety.CheckSourceEdit(summary.RelativePath);
 
         if (!decision.IsAllowed)
         {

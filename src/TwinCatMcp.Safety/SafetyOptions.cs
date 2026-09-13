@@ -1,61 +1,33 @@
 namespace TwinCatMcp.Safety;
 
 /// <summary>
-/// Operator-controlled policy for everything that can change PLC source, live variable values, runtime
-/// state, or the XAE project/build. Bound from configuration (appsettings.json / environment variables)
-/// so an operator can tune the "blast radius" of an autonomously-acting agent without recompiling.
+/// The runtime safety policy, expressed as three independent toggles. Each starts <c>false</c> — a fresh
+/// server blocks live ADS symbol writes, configuration downloads, and runtime state changes until an
+/// operator (or the agent, via <c>set_safety_toggles</c>) deliberately flips one on for the session.
 ///
-/// Ship with conservative defaults: <see cref="SafeMode"/> on and every allow-list empty. An operator must
-/// deliberately opt in to write access — fail-closed, not fail-open.
+/// These are seeded from configuration (appsettings.json / environment variables such as
+/// <c>Safety__AllowAdsWrites</c>) at startup and can be changed live at runtime — they are not the whole
+/// model: every mutating operation is still recorded to the append-only audit log regardless of verdict.
 /// </summary>
 public sealed class SafetyOptions
 {
     public const string SectionName = "Safety";
 
     /// <summary>
-    /// Path to the append-only JSON-lines audit log file. Relative paths are resolved against the
-    /// process's working directory. Defaults to a file alongside wherever the server is run from.
+    /// When true, the agent may write live PLC variable values via ADS
+    /// (<c>write_symbol</c> / <c>write_symbols_batch</c>).
     /// </summary>
-    public string AuditLogPath { get; set; } = "twincat-mcp-audit.jsonl";
+    public bool AllowAdsWrites { get; set; } = false;
 
     /// <summary>
-    /// When true (the default), every mutating operation — source edits, symbol writes, state changes,
-    /// build/automation ops — is denied outright. Read/browse/search tools remain fully available.
+    /// When true, the agent may download/activate a configuration to the runtime
+    /// (<c>activate_configuration</c>) — the operation that stops, reloads, and restarts the PLC.
     /// </summary>
-    public bool SafeMode { get; set; } = true;
+    public bool AllowDownloads { get; set; } = false;
 
     /// <summary>
-    /// Glob patterns (e.g. "MAIN.cmd_*", "HMI.*") matched case-insensitively against the dotted ADS symbol
-    /// name. A symbol write is only permitted if it matches at least one pattern here.
+    /// When true, the agent may change runtime state — <c>set_plc_state</c> (Run/Stop/Reset/Config)
+    /// and <c>restart_twincat</c> (cold runtime restart).
     /// </summary>
-    public List<string> WritableSymbolPatterns { get; set; } = [];
-
-    /// <summary>
-    /// Glob patterns matched against a PLC object's project-relative path (e.g. "POUs/Generated/*"). A
-    /// source edit is only permitted if its file matches at least one pattern here.
-    /// </summary>
-    public List<string> WritableSourcePathPatterns { get; set; } = [];
-
-    /// <summary>
-    /// Allowed runtime state transitions, written as "From-&gt;To" (e.g. "Run-&gt;Stop", "Stop-&gt;Run").
-    /// A transition not listed here is denied outright, regardless of <see cref="SafeMode"/>; one that
-    /// *is* listed still requires the caller to pass <c>confirm=true</c> (see <see cref="AlwaysConfirmStateTransitions"/>).
-    /// </summary>
-    public List<string> AllowedStateTransitions { get; set; } = [];
-
-    /// <summary>
-    /// When true (the default), every allowed state transition still requires explicit <c>confirm=true</c>
-    /// from the caller — creating an unmissable two-step "I intend to change runtime state" → "yes, do it"
-    /// flow that shows up in the agent's tool-call transcript for human review.
-    /// </summary>
-    public bool AlwaysConfirmStateTransitions { get; set; } = true;
-
-    /// <summary>
-    /// Automation-interface operation names (e.g. "ActivateConfiguration", "RestartTwinCat") that always
-    /// require <c>confirm=true</c> even when automation operations are otherwise enabled. The code-write
-    /// operations are listed by default because, unlike file-based source edits, automation writes are not
-    /// scoped by <see cref="WritableSourcePathPatterns"/> — confirmation is the only brake on them.
-    /// </summary>
-    public List<string> AlwaysConfirmAutomationOperations { get; set; } =
-        ["ActivateConfiguration", "RestartTwinCat", "DeletePlcObject", "WritePlcObjectDeclaration", "WritePlcObjectImplementation"];
+    public bool AllowRuntimeStateChanges { get; set; } = false;
 }

@@ -22,8 +22,10 @@ builder.Services.Configure<RuntimeOptions>(builder.Configuration.GetSection(Runt
 builder.Services.Configure<AutomationOptions>(builder.Configuration.GetSection(AutomationOptions.SectionName));
 
 // --- Cross-cutting safety (shared by Source/Runtime/Automation tools) ---
+// The audit log is always on at a fixed path under the PLC project root (the process cwd) — it is not
+// configurable, so there is no way to run the server without recording every mutating attempt.
 builder.Services.AddSingleton(sp => new OperationAuditLog(
-    ResolveAuditLogPath(sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<SafetyOptions>>().Value),
+    Path.Combine(ResolveProjectRoot(), "twincat-mcp-audit.jsonl"),
     sp.GetRequiredService<ILogger<OperationAuditLog>>()));
 builder.Services.AddSingleton<SafetyGate>();
 
@@ -87,12 +89,3 @@ await host.RunAsync();
 /// cwd isn't a PLC project.
 /// </summary>
 static string ResolveProjectRoot() => Directory.GetCurrentDirectory();
-
-/// <summary>
-/// Resolves the audit log path: explicit config wins; otherwise place it under the PLC project root so
-/// each project's audit trail travels with it.
-/// </summary>
-static string ResolveAuditLogPath(SafetyOptions options) =>
-    Path.IsPathRooted(options.AuditLogPath)
-        ? options.AuditLogPath
-        : Path.Combine(ResolveProjectRoot(), options.AuditLogPath);

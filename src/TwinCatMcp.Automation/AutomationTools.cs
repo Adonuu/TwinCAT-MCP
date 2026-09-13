@@ -15,10 +15,10 @@ namespace TwinCatMcp.Automation;
 /// why this can't be remoted). On any other platform every tool here reports that plainly rather than
 /// pretending to work — Source and Runtime tools remain fully available regardless.
 ///
-/// Build/clean/read-only browsing are not allow-list-gated (they don't mutate the PLC project source —
-/// see <see cref="SafetyGate.CheckAutomationOperation"/>), but SafeMode still blocks them, and
-/// <c>ActivateConfiguration</c>/<c>RestartTwinCat</c> always require explicit confirmation: both can
-/// disrupt a running physical system.
+/// Build/clean/browse/read operations are never gated by the safety toggles, and <c>ActivateConfiguration</c>
+/// (the configuration download) / <c>RestartTwinCat</c> are gated by <c>AllowDownloads</c> /
+/// <c>AllowRuntimeStateChanges</c> respectively — both can disrupt a running physical system. Every gated
+/// operation is recorded to the audit log either way (see <see cref="SafetyGate"/> and <c>SAFETY.md</c>).
 /// </summary>
 [McpServerToolType]
 public static class AutomationTools
@@ -39,15 +39,14 @@ public static class AutomationTools
 
     [McpServerTool, Description("Saves all pending changes in the open XAE project (project files and open documents). " +
         "IMPORTANT after CreatePlcObject/DeletePlcObject/ImportPlcObject: tree changes only persist to the .plcproj/.tsproj on a save " +
-        "(Build and ActivateConfiguration save implicitly) — closing without one discards them. Gated by the safety policy.")]
+        "(Build and ActivateConfiguration save implicitly) — closing without one discards them. Recorded to the audit log.")]
     public static async Task<string> SaveProject(
         XaeShellSession session,
         SafetyGate safety,
         [Description("If true, evaluate the safety decision and report it without saving. Default false.")] bool dryRun = false,
-        [Description("Required if the safety policy says this needs confirmation.")] bool confirm = false,
         CancellationToken cancellationToken = default)
     {
-        var decision = safety.CheckAutomationOperation("SaveProject", confirm);
+        var decision = safety.CheckAutomationOperation("SaveProject");
         if (!decision.IsAllowed || dryRun)
             return Serialize(new AutomationOperationResult(Applied: false, Succeeded: false, Error: null, decision.Reason, Detail: null));
 
@@ -59,27 +58,25 @@ public static class AutomationTools
         => Serialize(await session.GetProjectStatusAsync(cancellationToken));
 
     [McpServerTool, Description("Builds the open XAE project (or one of its solution configurations) and reports the resulting error/warning list. " +
-        "Gated by the safety policy — SafeMode blocks it, since a build can run code generation that touches the project tree.")]
+        "Not gated by the safety toggles — always permitted, recorded to the audit log. Pass dryRun=true to preview.")]
     public static async Task<string> BuildProject(
         XaeShellSession session,
         SafetyGate safety,
         [Description("Solution configuration to build, e.g. 'Release|TwinCAT RT (x64)'. Omit to build the active configuration.")] string? configuration = null,
         [Description("If true, evaluate the safety decision and report it without building. Default false.")] bool dryRun = false,
-        [Description("Required if the safety policy says this needs confirmation.")] bool confirm = false,
         CancellationToken cancellationToken = default)
-        => await GuardedBuildOperation(session, safety, "Build", configuration, dryRun, confirm,
+        => await GuardedBuildOperation(session, safety, "Build", configuration, dryRun,
             (s, cfg, ct) => s.BuildAsync(cfg, ct), cancellationToken);
 
     [McpServerTool, Description("Cleans the open XAE project (or one of its solution configurations). " +
-        "Gated by the safety policy — SafeMode blocks it, like Build.")]
+        "Not gated by the safety toggles — always permitted, recorded to the audit log. Pass dryRun=true to preview.")]
     public static async Task<string> CleanProject(
         XaeShellSession session,
         SafetyGate safety,
         [Description("Solution configuration to clean, e.g. 'Release|TwinCAT RT (x64)'. Omit to clean the active configuration.")] string? configuration = null,
         [Description("If true, evaluate the safety decision and report it without cleaning. Default false.")] bool dryRun = false,
-        [Description("Required if the safety policy says this needs confirmation.")] bool confirm = false,
         CancellationToken cancellationToken = default)
-        => await GuardedBuildOperation(session, safety, "Clean", configuration, dryRun, confirm,
+        => await GuardedBuildOperation(session, safety, "Clean", configuration, dryRun,
             (s, cfg, ct) => s.CleanAsync(cfg, ct), cancellationToken);
 
     [McpServerTool, Description("Reads the XAE Shell's current error list (from the last build) without triggering a new build.")]
@@ -92,15 +89,14 @@ public static class AutomationTools
 
     [McpServerTool, Description("Activates the open project's current configuration (the IDE's 'Activate Configuration' / 'Save to Registry' command) — this downloads it to the " +
         "target and can briefly interrupt a running system. There is no concept of multiple named configurations to choose between; this always activates the project as it " +
-        "currently stands. High-impact: gated by the safety policy and always requires confirm=true. Pass dryRun=true to preview the decision.")]
+        "currently stands. High-impact: gated by the safety toggles (Safety:AllowDownloads — enable it with set_safety_toggles). Pass dryRun=true to preview the decision.")]
     public static async Task<string> ActivateConfiguration(
         XaeShellSession session,
         SafetyGate safety,
         [Description("If true, evaluate the safety decision and report it without activating anything. Default false.")] bool dryRun = false,
-        [Description("Required — activation is always gated behind explicit confirmation.")] bool confirm = false,
         CancellationToken cancellationToken = default)
     {
-        var decision = safety.CheckAutomationOperation("ActivateConfiguration", confirm);
+        var decision = safety.CheckAutomationOperation("ActivateConfiguration");
         if (!decision.IsAllowed || dryRun)
             return Serialize(new AutomationOperationResult(Applied: false, Succeeded: false, Error: null, decision.Reason, Detail: null));
 
@@ -108,15 +104,15 @@ public static class AutomationTools
     }
 
     [McpServerTool, Description("Performs a full cold restart of the TwinCAT runtime on the target. " +
-        "Highest-impact automation operation: it interrupts whatever the runtime is currently doing. Gated by the safety policy and always requires confirm=true.")]
+        "Highest-impact automation operation: it interrupts whatever the runtime is currently doing. Gated by the safety toggles " +
+        "(Safety:AllowRuntimeStateChanges — enable it with set_safety_toggles).")]
     public static async Task<string> RestartTwinCat(
         XaeShellSession session,
         SafetyGate safety,
         [Description("If true, evaluate the safety decision and report it without restarting anything. Default false.")] bool dryRun = false,
-        [Description("Required — restarting is always gated behind explicit confirmation.")] bool confirm = false,
         CancellationToken cancellationToken = default)
     {
-        var decision = safety.CheckAutomationOperation("RestartTwinCat", confirm);
+        var decision = safety.CheckAutomationOperation("RestartTwinCat");
         if (!decision.IsAllowed || dryRun)
             return Serialize(new AutomationOperationResult(Applied: false, Succeeded: false, Error: null, decision.Reason, Detail: null));
 
@@ -140,7 +136,7 @@ public static class AutomationTools
     [McpServerTool, Description("Creates a new POU/GVL/DUT/folder INSIDE the open project's tree via the Automation Interface — the only " +
         "way to create PLC objects: a single call both writes the file and registers it with the IDE (correct GUID/.xti sync), immediately " +
         "visible to the IDE and build, no manual 'Add Existing Item' needed. " +
-        "Gated by the safety policy — pass dryRun=true to preview without creating anything.")]
+        "Not gated by the safety toggles — always permitted, recorded to the audit log. Pass dryRun=true to preview without creating anything.")]
     public static async Task<string> CreatePlcObject(
         XaeShellSession session,
         SafetyGate safety,
@@ -150,10 +146,9 @@ public static class AutomationTools
         [Description("For kind='Pou' only: 'Program', 'Function', or 'FunctionBlock'. Defaults to 'Program'. Ignored for other kinds.")] string? pouType = null,
         [Description("For pouType='Function' only: the function's return type (a PLC data type, e.g. 'BOOL', 'DINT', 'LREAL'). Defaults to 'BOOL'. Ignored otherwise.")] string? returnType = null,
         [Description("If true, validate that parentTreePath resolves (read-only LookupTreeItem) and report the safety decision, without creating anything. Default false.")] bool dryRun = false,
-        [Description("Required if the safety policy says this needs confirmation.")] bool confirm = false,
         CancellationToken cancellationToken = default)
     {
-        var decision = safety.CheckAutomationOperation("CreatePlcObject", confirm);
+        var decision = safety.CheckAutomationOperation("CreatePlcObject");
         if (dryRun)
         {
             // Read-only probe: a dry run should answer "would this parent path work?", not just echo
@@ -184,20 +179,19 @@ public static class AutomationTools
         "PREFER this over the file-based WritePouDeclaration whenever an XAE session has the project open: direct file edits are invisible " +
         "to the IDE and get overwritten on its next save. Write the COMPLETE block including the header line, matching what ReadPlcObjectCode " +
         "returns. REMEMBER: call SaveProject afterwards to persist to disk, and BuildProject to validate. Pass dryRun=true to preview the " +
-        "safety decision and get the current text back without changing anything. Gated by the safety policy and requires confirm=true by default.")]
+        "change without writing anything. Not gated by the safety toggles — always permitted, recorded to the audit log.")]
     public static async Task<string> WritePlcObjectDeclaration(
         XaeShellSession session,
         SafetyGate safety,
         [Description("Tree path of the object, as reported by GetProjectTree.")] string treePath,
         [Description("The complete new declaration text, replacing the existing block verbatim.")] string newDeclarationText,
-        [Description("If true, validate the tree path and return the current text without writing — read-only, so it works even before confirm. Default false.")] bool dryRun = false,
-        [Description("Required if the safety policy says this needs confirmation.")] bool confirm = false,
+        [Description("If true, validate the tree path and return the current text without writing — read-only. Default false.")] bool dryRun = false,
         CancellationToken cancellationToken = default)
     {
         // A dry run never mutates (it resolves the path and returns the current text), so it proceeds
         // regardless of the safety verdict — the verdict still rides along in SafetyReason so the
         // caller learns whether the real write would be allowed.
-        var decision = safety.CheckAutomationOperation("WritePlcObjectDeclaration", confirm);
+        var decision = safety.CheckAutomationOperation("WritePlcObjectDeclaration");
         if (!dryRun && !decision.IsAllowed)
             return Serialize(new PlcCodeWriteResult(Applied: false, Succeeded: false, treePath, PreviousText: null, decision.Reason, Error: null));
 
@@ -208,19 +202,18 @@ public static class AutomationTools
         "Interface — the change lands in the IDE's in-memory project, exactly as if typed in the editor. GVLs and DUTs have no implementation " +
         "and will be rejected. PREFER this over the file-based WritePouImplementation whenever an XAE session has the project open: direct " +
         "file edits are invisible to the IDE and get overwritten on its next save. REMEMBER: call SaveProject afterwards to persist to disk, " +
-        "and BuildProject to validate. Pass dryRun=true to preview the safety decision and get the current text back without changing anything. " +
-        "Gated by the safety policy and requires confirm=true by default.")]
+        "and BuildProject to validate. Pass dryRun=true to preview the change without writing anything. " +
+        "Not gated by the safety toggles — always permitted, recorded to the audit log.")]
     public static async Task<string> WritePlcObjectImplementation(
         XaeShellSession session,
         SafetyGate safety,
         [Description("Tree path of the POU, as reported by GetProjectTree.")] string treePath,
         [Description("The complete new implementation source text, replacing the existing body verbatim.")] string newImplementationText,
-        [Description("If true, validate the tree path and return the current text without writing — read-only, so it works even before confirm. Default false.")] bool dryRun = false,
-        [Description("Required if the safety policy says this needs confirmation.")] bool confirm = false,
+        [Description("If true, validate the tree path and return the current text without writing — read-only. Default false.")] bool dryRun = false,
         CancellationToken cancellationToken = default)
     {
         // Same read-only dry-run contract as WritePlcObjectDeclaration.
-        var decision = safety.CheckAutomationOperation("WritePlcObjectImplementation", confirm);
+        var decision = safety.CheckAutomationOperation("WritePlcObjectImplementation");
         if (!dryRun && !decision.IsAllowed)
             return Serialize(new PlcCodeWriteResult(Applied: false, Succeeded: false, treePath, PreviousText: null, decision.Reason, Error: null));
 
@@ -228,17 +221,16 @@ public static class AutomationTools
     }
 
     [McpServerTool, Description("Deletes a PLC object (POU/GVL/DUT/folder, with all its children) from the open project's tree. " +
-        "Irreversible from the agent's perspective. High-impact: gated by the safety policy and always requires confirm=true. " +
+        "Irreversible from the agent's perspective. Not gated by the safety toggles — always permitted, recorded to the audit log. " +
         "Pass dryRun=true to preview the decision.")]
     public static async Task<string> DeletePlcObject(
         XaeShellSession session,
         SafetyGate safety,
         [Description("Tree path of the object to delete, as reported by GetProjectTree, e.g. 'TIPC^MyPlcProject^MyPlcProject Project^POUs^OldPou'.")] string treePath,
         [Description("If true, validate that treePath resolves (read-only LookupTreeItem) and report the safety decision, without deleting anything. Default false.")] bool dryRun = false,
-        [Description("Required — deletion is always gated behind explicit confirmation.")] bool confirm = false,
         CancellationToken cancellationToken = default)
     {
-        var decision = safety.CheckAutomationOperation("DeletePlcObject", confirm);
+        var decision = safety.CheckAutomationOperation("DeletePlcObject");
         if (dryRun)
         {
             var target = await session.ValidateTreePathAsync(treePath, cancellationToken);
@@ -256,17 +248,16 @@ public static class AutomationTools
 
     [McpServerTool, Description("Imports a previously-exported PLCopen XML file into the PLC project — the supported way " +
         "to bring an object in from another project with correct registration. Imported objects land at the paths recorded " +
-        "in the file (relative to the PLC project root), not under the given parent. Gated by the safety policy.")]
+        "in the file (relative to the PLC project root), not under the given parent. Not gated by the safety toggles — recorded to the audit log.")]
     public static async Task<string> ImportPlcObject(
         XaeShellSession session,
         SafetyGate safety,
         [Description("Tree path identifying the target PLC project (any path inside it works), e.g. 'TIPC^MyPlcProject^MyPlcProject Project'.")] string parentTreePath,
         [Description("Full path to the PLCopen XML file to import (from a previous ExportPlcObject).")] string exportFilePath,
         [Description("If true, evaluate the safety decision and report it without importing anything. Default false.")] bool dryRun = false,
-        [Description("Required if the safety policy says this needs confirmation.")] bool confirm = false,
         CancellationToken cancellationToken = default)
     {
-        var decision = safety.CheckAutomationOperation("ImportPlcObject", confirm);
+        var decision = safety.CheckAutomationOperation("ImportPlcObject");
         if (!decision.IsAllowed || dryRun)
             return Serialize(new AutomationOperationResult(Applied: false, Succeeded: false, Error: null, decision.Reason, Detail: null));
 
@@ -274,17 +265,16 @@ public static class AutomationTools
     }
 
     [McpServerTool, Description("Exports a PLC object (POU/GVL/DUT/folder) from the project tree to a PLCopen XML file on disk — the supported " +
-        "way to move an object to another project. Gated by the safety policy (it writes to disk, like a source edit, even though the project itself doesn't change).")]
+        "way to move an object to another project. Not gated by the safety toggles — recorded to the audit log (it writes to disk, like a source edit).")]
     public static async Task<string> ExportPlcObject(
         XaeShellSession session,
         SafetyGate safety,
         [Description("Tree path of the object to export, as reported by GetProjectTree.")] string treePath,
         [Description("Full path to write the PLCopen XML export to (conventionally '.xml').")] string exportFilePath,
         [Description("If true, evaluate the safety decision and report it without exporting anything. Default false.")] bool dryRun = false,
-        [Description("Required if the safety policy says this needs confirmation.")] bool confirm = false,
         CancellationToken cancellationToken = default)
     {
-        var decision = safety.CheckAutomationOperation("ExportPlcObject", confirm);
+        var decision = safety.CheckAutomationOperation("ExportPlcObject");
         if (!decision.IsAllowed || dryRun)
             return Serialize(new AutomationOperationResult(Applied: false, Succeeded: false, Error: null, decision.Reason, Detail: null));
 
@@ -297,11 +287,10 @@ public static class AutomationTools
         string operationName,
         string? configuration,
         bool dryRun,
-        bool confirm,
         Func<XaeShellSession, string?, CancellationToken, Task<BuildResult>> run,
         CancellationToken cancellationToken)
     {
-        var decision = safety.CheckAutomationOperation(operationName, confirm);
+        var decision = safety.CheckAutomationOperation(operationName);
         if (!decision.IsAllowed || dryRun)
             return Serialize(new { Applied = false, decision.Reason, Result = (BuildResult?)null });
 

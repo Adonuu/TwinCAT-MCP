@@ -55,39 +55,37 @@ public static class RuntimeTools
         return Serialize(results);
     }
 
-    [McpServerTool, Description("Writes a value to a live ADS symbol. Gated by the safety policy (SafeMode, WritableSymbolPatterns, confirm) — " +
-        "pass dryRun=true to see what the gate would decide without writing anything.")]
+    [McpServerTool, Description("Writes a value to a live ADS symbol. Gated by the safety toggles (Safety:AllowAdsWrites) — " +
+        "pass dryRun=true to see what the gate would decide without writing anything. Enable via set_safety_toggles.")]
     public static async Task<string> WriteSymbol(
         SymbolBrowser browser,
         SafetyGate safety,
         [Description("Dotted instance path of the symbol to write.")] string symbol,
         [Description("The value to write. Primitives are passed directly; for structs/arrays pass a JSON object/array matching the symbol's shape.")] JsonElement value,
         [Description("If true, evaluate the safety decision and report it without writing. Default false.")] bool dryRun = false,
-        [Description("Required to proceed once the safety policy says the write is allowed but needs confirmation.")] bool confirm = false,
         CancellationToken cancellationToken = default)
     {
-        var decision = safety.CheckSymbolWrite(symbol, confirm);
+        var decision = safety.CheckSymbolWrite(symbol);
         if (!decision.IsAllowed || dryRun)
             return Serialize(new SymbolWriteResult(symbol, Applied: false, Succeeded: false, Error: null, decision.Reason));
 
         return Serialize(await WriteOneAsync(browser, symbol, value, decision.Reason, cancellationToken));
     }
 
-    [McpServerTool, Description("Writes several ADS symbols in one call, each gated independently by the safety policy. " +
-        "Returns one result per write so partial application — and exactly why each write was allowed, denied, or needs confirmation — is visible.")]
+    [McpServerTool, Description("Writes several ADS symbols in one call, each gated independently by the safety toggles. " +
+        "Returns one result per write so partial application — and exactly why each write was allowed or denied — is visible.")]
     public static async Task<string> WriteSymbolsBatch(
         SymbolBrowser browser,
         SafetyGate safety,
         [Description("Writes to perform, each as {\"symbol\": \"<instance path>\", \"value\": <JSON value>}.")] SymbolWriteRequest[] writes,
         [Description("If true, evaluate every safety decision and report them without writing anything. Default false.")] bool dryRun = false,
-        [Description("Required for any write whose safety decision needs confirmation.")] bool confirm = false,
         CancellationToken cancellationToken = default)
     {
         var results = new List<SymbolWriteResult>(writes.Length);
 
         foreach (var write in writes)
         {
-            var decision = safety.CheckSymbolWrite(write.Symbol, confirm);
+            var decision = safety.CheckSymbolWrite(write.Symbol);
             if (!decision.IsAllowed || dryRun)
             {
                 results.Add(new SymbolWriteResult(write.Symbol, Applied: false, Succeeded: false, Error: null, decision.Reason));
@@ -205,14 +203,13 @@ public static class RuntimeTools
         return Serialize(ToStateInfo(state.State));
     }
 
-    [McpServerTool, Description("Requests a PLC run-state transition (e.g. Run -> Stop, Stop -> Run, or Reset). High-impact and gated by the safety policy " +
-        "(SafeMode, AllowedStateTransitions, confirm — state transitions always require confirm=true by default). Pass dryRun=true to preview the decision.")]
+    [McpServerTool, Description("Requests a PLC run-state transition (e.g. Run -> Stop, Stop -> Run, Reset, or Config). " +
+        "High-impact and gated by the safety toggles (Safety:AllowRuntimeStateChanges — enable it with set_safety_toggles). Pass dryRun=true to preview the decision.")]
     public static async Task<string> SetPlcState(
         AdsConnectionManager connections,
         SafetyGate safety,
         [Description("Target ADS state to request: Run, Stop, Reset, or Config.")] string targetState,
         [Description("If true, evaluate the safety decision and report it without changing anything. Default false.")] bool dryRun = false,
-        [Description("Required once the safety policy says the transition is allowed but needs confirmation (the default for all state transitions).")] bool confirm = false,
         CancellationToken cancellationToken = default)
     {
         var client = await connections.EnsureConnectedAsync(ct: cancellationToken);
@@ -220,7 +217,7 @@ public static class RuntimeTools
         var currentState = ToStateInfo(current.State);
 
         var target = ParseAdsState(targetState);
-        var decision = safety.CheckStateTransition(currentState.AdsState, target.ToString(), confirm);
+        var decision = safety.CheckStateTransition(currentState.AdsState, target.ToString());
 
         if (!decision.IsAllowed || dryRun)
             return Serialize(new StateChangeResult(Applied: false, Succeeded: false, Error: null, decision.Reason, ResultingState: currentState));

@@ -22,145 +22,139 @@ public sealed class SafetyGateTests : IDisposable
 
     private SafetyGate CreateGate(Action<SafetyOptions>? configure = null)
     {
-        var options = new SafetyOptions { SafeMode = false };
+        var options = new SafetyOptions();
         configure?.Invoke(options);
         var audit = new OperationAuditLog(_logPath, NullLogger<OperationAuditLog>.Instance);
         return new SafetyGate(Options.Create(options), audit);
     }
 
     [Fact]
-    public void SafeMode_denies_symbol_write_even_when_allow_listed()
+    public void Symbol_write_denied_by_default()
     {
-        var gate = CreateGate(o =>
-        {
-            o.SafeMode = true;
-            o.WritableSymbolPatterns.Add("MAIN.*");
-        });
+        var gate = CreateGate();
 
-        var decision = gate.CheckSymbolWrite("MAIN.cmd_start", confirm: true);
+        var decision = gate.CheckSymbolWrite("MAIN.cmd_start");
 
         Assert.Equal(SafetyVerdict.Denied, decision.Verdict);
-        Assert.Contains("SafeMode", decision.Reason);
+        Assert.Contains("AllowAdsWrites", decision.Reason);
     }
 
     [Fact]
-    public void Symbol_write_denied_when_not_allow_listed()
+    public void Symbol_write_allowed_when_allow_ads_writes_enabled()
     {
-        var gate = CreateGate(o => o.WritableSymbolPatterns.Add("MAIN.cmd_*"));
+        var gate = CreateGate(o => o.AllowAdsWrites = true);
 
-        var decision = gate.CheckSymbolWrite("Safety.eStop", confirm: true);
-
-        Assert.Equal(SafetyVerdict.Denied, decision.Verdict);
-        Assert.Contains("WritableSymbolPatterns", decision.Reason);
-    }
-
-    [Theory]
-    [InlineData("MAIN.cmd_start")]
-    [InlineData("main.CMD_STOP")] // glob matching is case-insensitive
-    public void Symbol_write_allowed_when_glob_matches(string symbolName)
-    {
-        var gate = CreateGate(o => o.WritableSymbolPatterns.Add("MAIN.cmd_*"));
-
-        var decision = gate.CheckSymbolWrite(symbolName, confirm: true);
+        var decision = gate.CheckSymbolWrite("MAIN.cmd_start");
 
         Assert.Equal(SafetyVerdict.Allowed, decision.Verdict);
     }
 
     [Fact]
-    public void Source_edit_denied_when_path_not_allow_listed()
+    public void State_transition_denied_by_default()
     {
-        var gate = CreateGate(o => o.WritableSourcePathPatterns.Add("POUs/Generated/*"));
+        var gate = CreateGate();
 
-        var decision = gate.CheckSourceEdit("POUs/MAIN.TcPOU", confirm: true);
+        var decision = gate.CheckStateTransition("Run", "Stop");
 
         Assert.Equal(SafetyVerdict.Denied, decision.Verdict);
+        Assert.Contains("AllowRuntimeStateChanges", decision.Reason);
     }
 
     [Fact]
-    public void Source_edit_allowed_when_path_glob_matches()
+    public void State_transition_allowed_when_runtime_state_changes_enabled()
     {
-        var gate = CreateGate(o => o.WritableSourcePathPatterns.Add("POUs/Generated/*"));
+        var gate = CreateGate(o => o.AllowRuntimeStateChanges = true);
 
-        var decision = gate.CheckSourceEdit("POUs/Generated/Foo.TcPOU", confirm: true);
+        var decision = gate.CheckStateTransition("Run", "Config");
 
         Assert.Equal(SafetyVerdict.Allowed, decision.Verdict);
     }
 
     [Fact]
-    public void State_transition_denied_when_not_in_allow_list()
+    public void Activate_configuration_denied_by_default()
     {
-        var gate = CreateGate(o => o.AllowedStateTransitions.Add("Run->Stop"));
+        var gate = CreateGate();
 
-        var decision = gate.CheckStateTransition("Run", "Reset", confirm: true);
+        var decision = gate.CheckAutomationOperation("ActivateConfiguration");
 
         Assert.Equal(SafetyVerdict.Denied, decision.Verdict);
+        Assert.Contains("AllowDownloads", decision.Reason);
     }
 
     [Fact]
-    public void State_transition_requires_confirmation_even_when_allow_listed()
+    public void Activate_configuration_allowed_when_downloads_enabled()
     {
-        var gate = CreateGate(o =>
-        {
-            o.AllowedStateTransitions.Add("Run->Stop");
-            o.AlwaysConfirmStateTransitions = true;
-        });
+        var gate = CreateGate(o => o.AllowDownloads = true);
 
-        var withoutConfirm = gate.CheckStateTransition("Run", "Stop", confirm: false);
-        var withConfirm = gate.CheckStateTransition("Run", "Stop", confirm: true);
-
-        Assert.Equal(SafetyVerdict.RequiresConfirmation, withoutConfirm.Verdict);
-        Assert.Equal(SafetyVerdict.Allowed, withConfirm.Verdict);
-    }
-
-    [Fact]
-    public void State_transition_allowed_without_confirmation_when_policy_disables_it()
-    {
-        var gate = CreateGate(o =>
-        {
-            o.AllowedStateTransitions.Add("Run->Stop");
-            o.AlwaysConfirmStateTransitions = false;
-        });
-
-        var decision = gate.CheckStateTransition("Run", "Stop", confirm: false);
+        var decision = gate.CheckAutomationOperation("ActivateConfiguration");
 
         Assert.Equal(SafetyVerdict.Allowed, decision.Verdict);
     }
 
     [Fact]
-    public void Automation_operation_in_always_confirm_list_requires_confirmation()
+    public void Restart_twincat_denied_unless_runtime_state_changes_enabled()
     {
-        var gate = CreateGate(o => o.AlwaysConfirmAutomationOperations = ["RestartTwinCat"]);
+        var gate = CreateGate(o => o.AllowAdsWrites = true); // another toggle being on must not help
 
-        var withoutConfirm = gate.CheckAutomationOperation("RestartTwinCat", confirm: false);
-        var withConfirm = gate.CheckAutomationOperation("RestartTwinCat", confirm: true);
+        var denied = gate.CheckAutomationOperation("RestartTwinCat");
+        Assert.Equal(SafetyVerdict.Denied, denied.Verdict);
 
-        Assert.Equal(SafetyVerdict.RequiresConfirmation, withoutConfirm.Verdict);
-        Assert.Equal(SafetyVerdict.Allowed, withConfirm.Verdict);
+        var allowed = CreateGate(o => o.AllowRuntimeStateChanges = true).CheckAutomationOperation("RestartTwinCat");
+        Assert.Equal(SafetyVerdict.Allowed, allowed.Verdict);
     }
 
     [Fact]
-    public void Automation_operation_not_in_always_confirm_list_does_not_require_confirmation()
+    public void Toggles_are_independent()
     {
-        var gate = CreateGate(o => o.AlwaysConfirmAutomationOperations = ["RestartTwinCat"]);
+        var gate = CreateGate(o => o.AllowAdsWrites = true);
 
-        var decision = gate.CheckAutomationOperation("BuildProject", confirm: false);
+        var write = gate.CheckSymbolWrite("MAIN.nCounter");
+        var download = gate.CheckAutomationOperation("ActivateConfiguration");
+        var stateChange = gate.CheckStateTransition("Run", "Stop");
+
+        Assert.Equal(SafetyVerdict.Allowed, write.Verdict);
+        Assert.Equal(SafetyVerdict.Denied, download.Verdict);
+        Assert.Equal(SafetyVerdict.Denied, stateChange.Verdict);
+    }
+
+    [Fact]
+    public void Source_edit_is_never_gated()
+    {
+        var gate = CreateGate();
+
+        var decision = gate.CheckSourceEdit("POUs/MAIN.TcPOU");
 
         Assert.Equal(SafetyVerdict.Allowed, decision.Verdict);
+    }
+
+    [Fact]
+    public void Ungated_automation_operations_are_never_gated()
+    {
+        var gate = CreateGate();
+
+        Assert.Equal(SafetyVerdict.Allowed, gate.CheckAutomationOperation("Build").Verdict);
+        Assert.Equal(SafetyVerdict.Allowed, gate.CheckAutomationOperation("SaveProject").Verdict);
+        Assert.Equal(SafetyVerdict.Allowed, gate.CheckAutomationOperation("DeletePlcObject").Verdict);
+        Assert.Equal(SafetyVerdict.Allowed, gate.CheckAutomationOperation("WritePlcObjectDeclaration").Verdict);
     }
 
     [Fact]
     public void Every_check_is_recorded_to_the_audit_log()
     {
-        var gate = CreateGate(o => o.WritableSymbolPatterns.Add("MAIN.*"));
+        var gate = CreateGate(o => o.AllowAdsWrites = true);
 
-        gate.CheckSymbolWrite("MAIN.cmd_start", confirm: true);
-        gate.CheckSymbolWrite("Safety.eStop", confirm: true);
+        gate.CheckSymbolWrite("MAIN.cmd_start");
+        gate.CheckStateTransition("Run", "Stop");
+        gate.CheckAutomationOperation("ActivateConfiguration");
+        gate.CheckSourceEdit("POUs/MAIN.TcPOU");
 
         var lines = File.ReadAllLines(_logPath);
-        Assert.Equal(2, lines.Length);
-        Assert.Contains("MAIN.cmd_start", lines[0]);
+        Assert.Equal(4, lines.Length);
+        Assert.Contains("WriteSymbol", lines[0]);
         Assert.Contains("Allowed", lines[0]);
-        Assert.Contains("Safety.eStop", lines[1]);
-        Assert.Contains("Denied", lines[1]);
+        Assert.Contains("SetPlcState", lines[1]);
+        Assert.Contains("Automation", lines[2]);
+        Assert.Contains("Denied", lines[2]); // activation denied by default
+        Assert.Contains("EditSource", lines[3]);
     }
 }

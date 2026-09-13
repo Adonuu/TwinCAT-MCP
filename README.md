@@ -25,14 +25,16 @@ A few examples of the kind of thing an agent can do once connected, one per scop
 - **Automation**: "Build the project and show me any errors" — the agent drives
   the XAE Shell to build/clean and reports back the resulting error list.
 
-Anything that changes state — symbol writes, run-state transitions, builds,
-restarts — goes through the safety policy described next, so these stay safe to
-explore even with writes enabled.
+Anything that touches the live runtime — symbol writes, run-state changes, configuration
+downloads — is gated by three safety toggles described next; read/browse/search tools are
+always available.
 
-Every operation that changes anything — source edits, symbol writes, state
-transitions, builds, restarts — is gated by a central safety policy with
-`SafeMode`/allow-lists/`dryRun`/`confirm` and an append-only audit log. See
-[`docs/SAFETY.md`](docs/SAFETY.md) before enabling any writes.
+Every operation that changes anything — source edits, symbol writes, state changes, builds,
+restarts — is recorded to an always-on append-only audit log (`twincat-mcp-audit.jsonl` in
+the working directory), regardless of whether a safety toggle allowed or blocked it. The
+three toggles (`AllowAdsWrites`, `AllowDownloads`, `AllowRuntimeStateChanges`) can be
+flipped live at runtime via the `set_safety_toggles` tool — no restart needed. See
+[`docs/SAFETY.md`](docs/SAFETY.md) before enabling any of them.
 
 ## Setup (Windows engineering workstation)
 
@@ -59,13 +61,32 @@ command), which puts a `twincat-mcp` binary on your PATH.
 
 #### Claude Code
 ```bash
-claude mcp add twincat twincat-mcp --env Runtime__AmsNetId=127.0.0.1.1.1 --env Runtime__AmsPort=851 --env Safety__SafeMode=true --env Automation__ShowIde=true
+claude mcp add twincat twincat-mcp --env Runtime__AmsNetId=127.0.0.1.1.1 --env Runtime__AmsPort=851 --env Automation__ShowIde=true
 ```
 
-Leave `Safety__SafeMode` as `true` to start — every read/browse/search tool works
-fully in this mode; only mutating operations are blocked. See
-[`docs/SAFETY.md`](docs/SAFETY.md) for the full policy model and a recommended
-staged rollout to enabling writes.
+#### OpenCode
+
+Add the server under `mcp` in your [`opencode.json`](https://opencode.ai/docs/mcp-servers/)
+(either the project-level `opencode.json` or the global config via
+`opencode mcp add`):
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "twincat": {
+      "type": "local",
+      "command": ["twincat-mcp"],
+      "enabled": true,
+      "environment": {
+        "Runtime__AmsNetId": "127.0.0.1.1.1",
+        "Runtime__AmsPort": "851",
+        "Automation__ShowIde": "false"
+      }
+    }
+  }
+}
+```
 
 ## License
 

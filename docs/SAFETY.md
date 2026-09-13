@@ -6,79 +6,93 @@ can disrupt a running physical system. Every operation that *changes* anything f
 through one chokepoint, `TwinCatMcp.Safety.SafetyGate`, before it touches disk, the ADS
 runtime, or the XAE Shell.
 
+The model deliberately stays to three independent on/off toggles, changeable live. There
+is no master "SafeMode" switch and no allow-lists — those added friction without buying
+much, and settings are meant to be flipped mid-session, not edited in a config file.
+
 Read/browse/search tools (`list_plc_objects`, `read_pou_source`, `search_plc_source`,
 `get_project_structure`, `read_symbol`, `browse_symbols`, `describe_type`, `get_plc_state`,
 `get_project_status`, `get_build_errors`, `list_hardware_configurations`, ...) are **never**
-gated — they remain fully available regardless of policy.
+gated — they remain fully available regardless of the toggles.
 
 ## Configuration (`Safety` section)
 
-Bind these from `appsettings.json`, environment variables (`Safety__SafeMode=true`, ...),
-or your MCP client's `env` block (see the [Configure](../README.md#3-configure)
-section in the README).
+Seed the defaults from `appsettings.json` or environment variables (`Safety__AllowAdsWrites=true`,
+...), then change them live with the `set_safety_toggles` tool (see below).
 
 | Option | Default | Effect |
 |---|---|---|
-| `SafeMode` | `true` | When `true`, **every** mutating operation is denied outright — source edits, symbol writes, state changes, build/clean/automation. This is the fail-closed default; an operator must deliberately turn it off. |
-| `WritableSymbolPatterns` | `[]` | Glob patterns (`*`, `?`, case-insensitive) matched against the dotted ADS symbol name. `write_symbol`/`write_symbols_batch` only succeed for symbols matching at least one entry. |
-| `WritableSourcePathPatterns` | `[]` | Glob patterns matched against a PLC object's project-relative path (e.g. `POUs/Generated/*`). `write_pou_declaration`/`write_pou_implementation` only succeed for matching files. |
-| `AllowedStateTransitions` | `[]` | Explicit `"From->To"` pairs (e.g. `"Stop->Run"`). `set_plc_state` denies any transition not listed here, regardless of `SafeMode`. |
-| `AlwaysConfirmStateTransitions` | `true` | Even an allow-listed transition still requires the caller to re-invoke with `confirm=true`. |
-| `AlwaysConfirmAutomationOperations` | `["ActivateConfiguration", "RestartTwinCat", "DeletePlcObject", "WritePlcObjectDeclaration", "WritePlcObjectImplementation"]` | Automation operation names that always require `confirm=true`, independent of `SafeMode`/allow-lists (build/clean/etc. are not allow-list-gated, but `SafeMode` still blocks them). The code-write operations are listed because automation writes are not scoped by `WritableSourcePathPatterns` — confirmation is the only brake on them. |
-| `AuditLogPath` | `twincat-mcp-audit.jsonl` | Append-only JSON-lines audit trail. A relative path is resolved under the configured PLC project root (falling back to the working directory). |
+| `AllowAdsWrites` | `false` | Allows `write_symbol` / `write_symbols_batch` — writing live PLC variable values via ADS. |
+| `AllowDownloads` | `false` | Allows `activate_configuration` — downloading/activating a configuration to the runtime, which stops, reloads, and restarts the PLC. |
+| `AllowRuntimeStateChanges` | `false` | Allows `set_plc_state` (Run/Stop/Reset/Config) and `restart_twincat` (cold runtime restart). |
+
+Everything else mutating is **not gated** by this policy: file-based source edits
+(`write_pou_declaration` / `write_pou_implementation`), `write_plc_object_*`,
+`build_project`, `clean_project`, `save_project`, `create_plc_object`,
+`delete_plc_object`, `import_plc_object`, `export_plc_object`. Those are the tools the
+server exists to provide (especially source edits) — gating them would defeat the purpose.
+They are still **recorded** to the audit log.
+
+> Removal note: the old `SafeMode`, `WritableSymbolPatterns`, `WritableSourcePathPatterns`,
+> `AllowedStateTransitions`, `AlwaysConfirmStateTransitions`, and
+> `AlwaysConfirmAutomationOperations` options are gone. Existing config keys under
+> `Safety:` other than the three toggles are ignored.
 
 ## How a check resolves
 
-`SafetyGate` evaluates every mutating call in this order — see `SafetyGate.Evaluate`:
+`SafetyGate` evaluates each mutating call against exactly one toggle:
 
-1. **`SafeMode` on?** → instant deny, with a reason naming `Safety:SafeMode`. Nothing else
-   is checked.
-2. **Allow-listed?** (symbol/path patterns, or state transition in `AllowedStateTransitions`)
-   → if not, deny with a reason naming the specific config key that would need an entry.
-3. **Confirmation required?** (`AlwaysConfirmStateTransitions`, or the operation name appears
-   in `AlwaysConfirmAutomationOperations`) and the caller didn't pass `confirm=true` → return
-   `RequiresConfirmation`, prompting a second, explicit tool call.
-4. Otherwise → **Allowed**.
+1. `write_symbol` / `write_symbols_batch` → allowed only if `AllowAdsWrites` is on.
+2. `activate_configuration` → allowed only if `AllowDownloads` is on.
+3. `set_plc_state` / `restart_twincat` → allowed only if `AllowRuntimeStateChanges` is on.
+4. Everything else (source edits, build/clean, PLC object create/delete/import/export,
+   save) → always allowed.
 
-Every mutating tool returns the resulting `SafetyDecision` (`Verdict` + human-readable
-`Reason`) directly in its JSON result — both the agent and a human reviewing the transcript
-can see *why* something was allowed, denied, or paused for confirmation. Nothing fails silently.
+Whatever the outcome, every check returns a `SafetyDecision` (`Verdict` + human-readable
+`Reason`) that rides along in the tool's JSON result, and the check is appended to the
+audit log. Nothing fails silently.
 
-## `dryRun` and `confirm`
+## Changing the toggles at runtime
 
-Every mutating tool accepts both:
+The defaults are seeded once at startup; after that you can flip them live, with no
+restart, from the tool surface:
 
-- **`dryRun=true`** — evaluate the safety decision and report it without applying anything.
-  Useful for an agent (or operator) to preview "what would happen" before committing.
-- **`confirm=true`** — required wherever the policy demands it (state transitions by default,
-  named automation operations, and any future high-impact tool). Passing it when it isn't
-  required is harmless; omitting it where it's required returns `RequiresConfirmation` rather
-  than acting — an unmissable two-step "I intend to do X" → "yes, do X" flow visible in the
-  agent's own tool-call transcript.
+- **`set_safety_toggles`** — pass one or more of `allowAdsWrites`, `allowDownloads`,
+  `allowRuntimeStateChanges` (`true`/`false`) to change them mid-session. Omit a toggle to
+  leave it unchanged. In practice you'd tell the agent, e.g. *"turn on ADS writes, write
+  the recipe values, then turn them back off"* — that becomes
+  `set_safety_toggles` → the writes → `set_safety_toggles` again, all visible in the
+  transcript.
+- **`get_safety_toggles`** — reports the current state so you (or the agent) can check
+  before attempting a write.
+
+Each `set_safety_toggles` call is itself written to the audit log as a `PolicyChanged`
+entry, so every permission flip is traceable. Toggles are **session-scoped**: a server
+restart resets them to the configured defaults.
 
 ## Audit log
 
-Every `SafetyGate` check — allowed, denied, *or* pending confirmation — is appended as one
-JSON object per line to `AuditLogPath` (`TimestampUtc`, `Operation`, `Subject`, `Verdict`,
-`Reason`, optional `Details`). This is an independent forensic record of everything an agent
-*attempted*, separate from whatever the LLM conversation log retains, and survives even if
-the operation itself was blocked. Failures to write the log are logged but never thrown —
-an audit-trail outage must not be able to take the server down or silently bypass the gate
-it observes.
+Every mutating attempt — allowed or denied — is appended as one JSON object per line to
+`twincat-mcp-audit.jsonl`, resolved under the process working directory (the indexed PLC
+project root). This is a fixed, non-configurable path: there is no way to run the server
+without recording. Each entry has `TimestampUtc`, `Operation`, `Subject`, `Verdict`,
+`Reason`, and optional `Details`. Failures to write the log are logged but never thrown —
+an audit-trail outage must not be able to take the server down.
 
 ## Recommended rollout
 
-1. **Start with `SafeMode=true`** (the default) and explore read-only: list/read PLC source,
-   read live symbols, read build errors and hardware configs. Confirm the audit log is being
-   written and the tool surface looks right.
-2. **Enable writes narrowly**, scoped to a non-production fixture or sandbox project first:
-   add a few entries to `WritableSymbolPatterns`/`WritableSourcePathPatterns`/
-   `AllowedStateTransitions` that match only what you intend to let the agent touch, then
-   flip `SafeMode=false`.
-3. **Leave `AlwaysConfirmStateTransitions=true`** and the default
-   `AlwaysConfirmAutomationOperations` list alone unless you have a specific, reviewed reason
-   to remove an operation from it — these are the operations most likely to interrupt a
-   running physical system.
-4. **Tail the audit log** (`tail -f <AuditLogPath>`) while running an agent session against
-   anything other than a sandbox, so a denied or confirmation-pending attempt is visible to
-   a human in real time, not just in retrospect.
+1. **Start with all toggles off** (the default). Explore read-only: list/read PLC source,
+   read live symbols, read build errors and hardware configs. Confirm `twincat-mcp-audit.jsonl`
+   is being written and the tool surface looks right.
+2. **Enable only what the session needs.** For a source-editing session you need nothing
+   on — source edits aren't gated. Add `AllowAdsWrites` only when the agent should poke live
+   variables (e.g. test values on a fixture), `AllowDownloads` only when you want it to
+   download/activate, and `AllowRuntimeStateChanges` only when it may stop/restart the PLC.
+   Flip them off as soon as the task's done.
+3. **Tail the audit log** (`tail -f twincat-mcp-audit.jsonl`) while running an agent
+   session against anything other than a sandbox, so every mutation is visible to a human
+   in real time.
+
+One thing to keep in mind: because source edits and PLC object create/delete/import/export
+are intentionally ungated, an agent with the server connected can modify the project tree
+the moment all toggles are left as-is. The audit log is the record of it, not a blocker.

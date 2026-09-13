@@ -8,7 +8,7 @@
       "registryType": "nuget",
       "registryBaseUrl": "https://api.nuget.org",
       "identifier": "Adonuu.TwinCatMcp",
-      "version": "0.3.0",
+"version": "0.4.0",
       "transport": {
         "type": "stdio"
       },
@@ -36,19 +36,25 @@
           "default": "false"
         },
         {
-          "name": "Safety__SafeMode",
-          "description": "When true (the default, fail-closed), every mutating operation — source edits, symbol writes, runtime state changes, build/automation — is denied outright; read/browse/search tools remain fully available. See docs/SAFETY.md before turning this off.",
+          "name": "Safety__AllowAdsWrites",
+          "description": "When true, the agent may write live PLC variable values via ADS (write_symbol / write_symbols_batch). Defaults to false; can be changed live mid-session with the set_safety_toggles tool. See docs/SAFETY.md.",
           "isRequired": false,
           "isSecret": false,
-          "default": "true"
+          "default": "false"
         },
         {
-          "name": "Safety__AuditLogPath",
-          "description": "Append-only JSON-lines audit trail of every safety-gated operation attempted (allowed, denied, or pending confirmation). A relative path is resolved under the indexed PLC project root.",
+          "name": "Safety__AllowDownloads",
+          "description": "When true, the agent may download/activate a configuration to the runtime (activate_configuration) — the operation that stops, reloads, and restarts the PLC. Defaults to false; can be changed live mid-session with the set_safety_toggles tool. See docs/SAFETY.md.",
           "isRequired": false,
           "isSecret": false,
-          "default": "twincat-mcp-audit.jsonl",
-          "format": "filepath"
+          "default": "false"
+        },
+        {
+          "name": "Safety__AllowRuntimeStateChanges",
+          "description": "When true, the agent may change runtime state: set_plc_state (Run/Stop/Reset/Config) and restart_twincat (cold restart). Defaults to false; can be changed live mid-session with the set_safety_toggles tool. See docs/SAFETY.md.",
+          "isRequired": false,
+          "isSecret": false,
+          "default": "false"
         }
       ]
     }

@@ -4,16 +4,17 @@ namespace TwinCatMcp.Safety;
 
 /// <summary>
 /// The single chokepoint every mutating operation — PLC source edits, live symbol writes, runtime state
-/// changes, and XAE build/automation operations — must pass through before doing anything irreversible.
+/// changes, and XAE build/automation operations — passes through.
 ///
-/// Centralizing this (rather than scattering checks across <c>RuntimeTools</c>/<c>AutomationTools</c>/
-/// <c>SourceTools</c>) means there is exactly one place to read, test, and reason about "what can an
-/// agent actually do to this system" — and exactly one place that writes to the audit trail, so nothing
-/// mutating can slip through unrecorded.
+/// Two things happen here, in one place:
+/// 1. The three toggles from <see cref="SafetyOptions"/> are enforced for the operations they cover —
+///    live ADS symbol writes (<see cref="AllowAdsWrites"/>), configuration downloads (<see cref="AllowDownloads"/>),
+///    and runtime state changes (<see cref="AllowRuntimeStateChanges"/>).
+/// 2. Every check — allowed *or* blocked — is recorded to the <see cref="OperationAuditLog"/>, so nothing
+///    mutating slips through unrecorded.
 ///
-/// Every check both returns a <see cref="SafetyDecision"/> *and* records it to the
-/// <see cref="OperationAuditLog"/> — the caller never has to remember to audit separately, and a denied
-/// or confirmation-pending attempt is just as visible in the trail as an allowed one.
+/// Operations not covered by a toggle (source file edits, build/clean, PLC object create/delete/import/export,
+/// save) are not gated by design — the gate still audits them. Read/browse/search tools never call this type.
 /// </summary>
 public sealed class SafetyGate
 {
@@ -26,82 +27,85 @@ public sealed class SafetyGate
         _audit = audit;
     }
 
-    /// <summary>Whether the gate is in read-only mode — exposed so tools can short-circuit and report it directly.</summary>
-    public bool SafeMode => _options.SafeMode;
+    /// <summary>Current toggle state — always a snapshot copy, so callers can't mutate the live policy by accident.</summary>
+    public SafetyToggleState Snapshot() => new(
+        AllowAdsWrites: _options.AllowAdsWrites,
+        AllowDownloads: _options.AllowDownloads,
+        AllowRuntimeStateChanges: _options.AllowRuntimeStateChanges);
+
+    /// <summary>
+    /// Updates toggles live for the current session; each <c>null</c> argument leaves that toggle unchanged.
+    /// The change is itself recorded to the audit log (every policy change is traceable).
+    /// </summary>
+    public SafetyToggleState SetToggles(bool? allowAdsWrites, bool? allowDownloads, bool? allowRuntimeStateChanges)
+    {
+        var changes = new List<string>(3);
+        if (allowAdsWrites is { } a) { _options.AllowAdsWrites = a; changes.Add($"AllowAdsWrites={a}"); }
+        if (allowDownloads is { } d) { _options.AllowDownloads = d; changes.Add($"AllowDownloads={d}"); }
+        if (allowRuntimeStateChanges is { } s) { _options.AllowRuntimeStateChanges = s; changes.Add($"AllowRuntimeStateChanges={s}"); }
+
+        var decision = SafetyDecision.Allow("Safety toggles updated for this session; reset to configured defaults on server restart.");
+        _audit.Record("PolicyChanged", changes.Count > 0 ? string.Join(", ", changes) : "no changes requested", decision);
+        return Snapshot();
+    }
 
     /// <summary>Gate for writing a live PLC symbol value via ADS.</summary>
-    public SafetyDecision CheckSymbolWrite(string symbolName, bool confirm)
+    public SafetyDecision CheckSymbolWrite(string symbolName)
     {
-        var decision = Evaluate(
-            allowListed: GlobPattern.AnyMatch(_options.WritableSymbolPatterns, symbolName),
-            notAllowListedReason: $"Symbol '{symbolName}' does not match any entry in Safety:WritableSymbolPatterns.",
-            requiresConfirmation: false,
-            confirm: confirm);
+        var decision = _options.AllowAdsWrites
+            ? SafetyDecision.Allow("Permitted — Safety:AllowAdsWrites is true.")
+            : SafetyDecision.Deny($"Symbol write to '{symbolName}' is blocked — Safety:AllowAdsWrites is false. Enable it with set_safety_toggles.");
 
         _audit.Record("WriteSymbol", symbolName, decision);
         return decision;
     }
 
-    /// <summary>Gate for editing a PLC source file's declaration or implementation text.</summary>
-    public SafetyDecision CheckSourceEdit(string relativePath, bool confirm)
+    /// <summary>
+    /// Audit-only pass-through for file-based PLC source edits (write_pou_declaration / write_pou_implementation):
+    /// not gated by the toggles, but recorded to the audit log.
+    /// </summary>
+    public SafetyDecision CheckSourceEdit(string relativePath)
     {
-        var decision = Evaluate(
-            allowListed: GlobPattern.AnyMatch(_options.WritableSourcePathPatterns, relativePath),
-            notAllowListedReason: $"'{relativePath}' does not match any entry in Safety:WritableSourcePathPatterns.",
-            requiresConfirmation: false,
-            confirm: confirm);
-
+        var decision = SafetyDecision.Allow("Source edits are not gated by the toggles — permitted; recorded to the audit log.");
         _audit.Record("EditSource", relativePath, decision);
         return decision;
     }
 
-    /// <summary>Gate for changing PLC runtime state (Run/Stop/Reset/Restart).</summary>
-    public SafetyDecision CheckStateTransition(string fromState, string toState, bool confirm)
+    /// <summary>Gate for changing PLC runtime state (Run/Stop/Reset/Config) via ADS.</summary>
+    public SafetyDecision CheckStateTransition(string fromState, string toState)
     {
         var transition = $"{fromState}->{toState}";
-        var decision = Evaluate(
-            allowListed: _options.AllowedStateTransitions.Contains(transition, StringComparer.OrdinalIgnoreCase),
-            notAllowListedReason: $"Transition '{transition}' is not listed in Safety:AllowedStateTransitions.",
-            requiresConfirmation: _options.AlwaysConfirmStateTransitions,
-            confirm: confirm);
+        var decision = _options.AllowRuntimeStateChanges
+            ? SafetyDecision.Allow("Permitted — Safety:AllowRuntimeStateChanges is true.")
+            : SafetyDecision.Deny($"Runtime state change '{transition}' is blocked — Safety:AllowRuntimeStateChanges is false. Enable it with set_safety_toggles.");
 
         _audit.Record("SetPlcState", transition, decision);
         return decision;
     }
 
     /// <summary>
-    /// Gate for an XAE Shell automation operation (build, clean, activate configuration, restart, ...).
-    /// Build/clean/read-error operations are generally not destructive, so they're not allow-list-gated —
-    /// but anything named in Safety:AlwaysConfirmAutomationOperations still requires explicit confirmation,
-    /// and SafeMode still blocks all of them, since "build" can trigger code generation that touches the
-    /// project tree and "restart" affects a running physical system.
+    /// Gate for an XAE Shell automation operation. Two operation names are covered by the toggles —
+    /// "ActivateConfiguration" (the download) by <see cref="AllowDownloads"/> and "RestartTwinCat" (cold
+    /// restart) by <see cref="AllowRuntimeStateChanges"/>. Everything else (build, clean, save, PLC object
+    /// create/delete/import/export/write) is audit-only — not gated, just recorded.
     /// </summary>
-    public SafetyDecision CheckAutomationOperation(string operationName, bool confirm)
+    public SafetyDecision CheckAutomationOperation(string operationName)
     {
-        var requiresConfirmation = _options.AlwaysConfirmAutomationOperations
-            .Contains(operationName, StringComparer.OrdinalIgnoreCase);
-
-        var decision = Evaluate(
-            allowListed: true,
-            notAllowListedReason: "(unreachable — automation operations are not allow-list-gated)",
-            requiresConfirmation: requiresConfirmation,
-            confirm: confirm);
+        var decision = operationName switch
+        {
+            "ActivateConfiguration" when !_options.AllowDownloads =>
+                SafetyDecision.Deny("Configuration download (ActivateConfiguration) is blocked — Safety:AllowDownloads is false. Enable it with set_safety_toggles."),
+            "ActivateConfiguration" =>
+                SafetyDecision.Allow("Permitted — Safety:AllowDownloads is true."),
+            "RestartTwinCat" when !_options.AllowRuntimeStateChanges =>
+                SafetyDecision.Deny("Runtime restart (RestartTwinCat) is blocked — Safety:AllowRuntimeStateChanges is false. Enable it with set_safety_toggles."),
+            "RestartTwinCat" =>
+                SafetyDecision.Allow("Permitted — Safety:AllowRuntimeStateChanges is true."),
+            _ =>
+                SafetyDecision.Allow("Operation is not gated by the toggles — permitted; recorded to the audit log."),
+        };
 
         _audit.Record("Automation", operationName, decision);
         return decision;
-    }
-
-    private SafetyDecision Evaluate(bool allowListed, string notAllowListedReason, bool requiresConfirmation, bool confirm)
-    {
-        if (_options.SafeMode)
-            return SafetyDecision.Deny("Server is running in SafeMode (Safety:SafeMode = true) — all mutating operations are denied. Read/browse/search tools remain available.");
-
-        if (!allowListed)
-            return SafetyDecision.Deny(notAllowListedReason);
-
-        if (requiresConfirmation && !confirm)
-            return SafetyDecision.NeedsConfirmation("This operation requires explicit confirmation — re-invoke the same tool call with confirm=true to proceed.");
-
-        return SafetyDecision.Allow("Permitted by current safety policy.");
     }
 }

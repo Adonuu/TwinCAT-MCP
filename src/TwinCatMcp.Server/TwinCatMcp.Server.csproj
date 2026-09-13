@@ -21,7 +21,7 @@
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
   </PropertyGroup>
@@ -42,7 +42,7 @@
     <ToolCommandName>twincat-mcp</ToolCommandName>
     <PackageId>Adonuu.TwinCatMcp</PackageId>
     <PackageType>McpServer</PackageType>
-    <Version>0.3.1</Version>
+    <Version>0.4.0</Version>
     <Description>MCP server for TwinCAT 3 — browse/edit PLC source, read/write live ADS variables, and drive the XAE Shell's build/automation interface.</Description>
     <PublishSelfContained>true</PublishSelfContained>
     <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
