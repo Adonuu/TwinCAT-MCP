@@ -50,6 +50,18 @@ public sealed class XaeShellSession : IAsyncDisposable
     public Task<ProjectInfo> OpenProjectAsync(string path, CancellationToken ct) =>
         RunAsync(() =>
         {
+            // Idempotency guard: agents occasionally retry open_xae_project while the project is already
+            // open (unaware the first open is just slow — see the tool description). Re-running
+            // dte.Solution.Open would block on the STA thread for the full load again for zero benefit,
+            // so short-circuit and report the already-open state instead. Only applies to the same
+            // project; a different path still opens normally below.
+            if (_openProjectPath is { } openPath &&
+                string.Equals(Path.GetFullPath(openPath), Path.GetFullPath(path), StringComparison.OrdinalIgnoreCase))
+            {
+                var currentName = _dte is { } knownDte ? TryGetString(() => (string)knownDte.Solution.FullName) : null;
+                return new ProjectInfo(Open: true, path, currentName);
+            }
+
             var dte = GetOrCreateDte();
             dte.MainWindow.Visible = _options.ShowIde;
             RetryIfComBusy(() => dte.Solution.Open(path));

@@ -26,7 +26,10 @@ public static class AutomationTools
     private static readonly JsonSerializerOptions Json = new() { WriteIndented = false };
 
     [McpServerTool, Description("Opens a TwinCAT XAE project (.sln or .tsproj) in the XAE Shell, ready for build/automation operations. " +
-        "Requires Windows with a local TwinCAT XAE Shell install.")]
+        "Requires Windows with a local TwinCAT XAE Shell install. " +
+        "SLOW OPERATION: the first open cold-launches the XAE Shell, then loads the project — normally ~20–30 s, up to ~60 s on a cold shell. " +
+        "This call blocks until the project is fully open; a delay is normal, not a hang. DO NOT RETRY — retries re-enter the same slow path and do not speed things up. " +
+        "If the project is already open, this call returns immediately with the current status.")]
     public static async Task<string> OpenXaeProject(
         XaeShellSession session,
         [Description("Full path to the .sln or .tsproj file to open.")] string path,
