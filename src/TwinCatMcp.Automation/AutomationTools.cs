@@ -92,7 +92,9 @@ public static class AutomationTools
 
     [McpServerTool, Description("Activates the open project's current configuration (the IDE's 'Activate Configuration' / 'Save to Registry' command) — this downloads it to the " +
         "target and can briefly interrupt a running system. There is no concept of multiple named configurations to choose between; this always activates the project as it " +
-        "currently stands. High-impact: gated by the safety toggles (Safety:AllowDownloads — enable it with set_safety_toggles). Pass dryRun=true to preview the decision.")]
+        "currently stands. Reported as failed if the implicit build the activation runs produces errors, or if the target's 7-day trial license needs a manual renewal " +
+        "(Beckhoff license dialog / captcha) — check the result's Error/Detail for which. High-impact: gated by the safety toggles (Safety:AllowDownloads — enable it with " +
+        "set_safety_toggles). Pass dryRun=true to preview the decision.")]
     public static async Task<string> ActivateConfiguration(
         XaeShellSession session,
         SafetyGate safety,

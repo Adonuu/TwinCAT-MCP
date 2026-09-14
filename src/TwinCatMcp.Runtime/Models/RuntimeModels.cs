@@ -3,6 +3,9 @@ namespace TwinCatMcp.Runtime.Models;
 /// <summary>Result of (re)establishing the ADS connection.</summary>
 public sealed record ConnectResult(bool Connected, string AmsNetId, int Port, bool IsLocal);
 
+/// <summary>Snapshot of the session's configured default ADS target — what tools use when a call doesn't specify one.</summary>
+public sealed record RuntimeTargetState(string? AmsNetId, int AmsPort);
+
 /// <summary>A single symbol read, success or failure.</summary>
 public sealed record SymbolReadResult(string Symbol, bool Succeeded, object? Value, string? Error);
 

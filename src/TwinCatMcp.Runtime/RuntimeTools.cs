@@ -32,6 +32,46 @@ public static class RuntimeTools
         return Serialize(new ConnectResult(client.IsConnected, address.NetId.ToString(), address.Port, client.IsLocal));
     }
 
+    [McpServerTool, Description("Reports the session's configured default ADS target — the AmsNetId/port tools fall back to when a call doesn't specify one — " +
+        "plus the target currently connected (which may be stale if the default was changed without reconnecting). " +
+        "Change the default live with set_runtime_target.")]
+    public static string GetRuntimeTarget(AdsConnectionManager connections)
+    {
+        var target = connections.CurrentTarget;
+        var address = connections.CurrentAddress;
+        return Serialize(new
+        {
+            Msg = "Current runtime target. Change the default live with set_runtime_target.",
+            target.AmsNetId,
+            target.AmsPort,
+            IsConnected = address is not null,
+            ConnectedAmsNetId = address?.NetId.ToString(),
+            ConnectedPort = address?.Port,
+        });
+    }
+
+    [McpServerTool, Description("Changes the session's default ADS target — the AmsNetId/port tools use when a call doesn't specify one — then reconnects immediately. " +
+        "Omit a value to leave it unchanged; pass an empty amsNetId to clear the default (use the local loopback runtime). " +
+        "The change is audit-logged and session-scoped — reset to the configured defaults on server restart. " +
+        "Reconnecting to a new target invalidates any active change-notification subscriptions (re-subscribe with SubscribeToChanges).")]
+    public static async Task<string> SetRuntimeTarget(
+        AdsConnectionManager connections,
+        [Description("AMS Net ID of the new session default, e.g. '127.0.0.1.1.1'. Omit to leave unchanged; pass an empty string to clear the default (local loopback).")] string? amsNetId = null,
+        [Description("AMS port of the new session default, e.g. 851 for PLC runtime 1. Omit to leave unchanged.")] int? port = null,
+        CancellationToken cancellationToken = default)
+    {
+        var target = connections.SetTarget(amsNetId, port);
+        var client = await connections.EnsureConnectedAsync(ct: cancellationToken);
+        var address = connections.CurrentAddress!;
+        return Serialize(new
+        {
+            target.AmsNetId,
+            target.AmsPort,
+            Connected = new ConnectResult(client.IsConnected, address.NetId.ToString(), address.Port, client.IsLocal),
+            Msg = "Runtime target updated for this session. Confirmed via get_runtime_target.",
+        });
+    }
+
     [McpServerTool, Description("Reads the current value of a single ADS symbol by its dotted instance path (e.g. 'MAIN.nCounter' or 'GVL_Globals.G_MAX_RETRIES'). " +
         "Returns the value as JSON — primitives map directly, structs/arrays come back as nested objects/arrays.")]
     public static async Task<string> ReadSymbol(

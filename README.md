@@ -36,6 +36,11 @@ three toggles (`AllowAdsWrites`, `AllowDownloads`, `AllowRuntimeStateChanges`) c
 flipped live at runtime via the `set_safety_toggles` tool — no restart needed. See
 [`docs/SAFETY.md`](docs/SAFETY.md) before enabling any of them.
 
+Like the toggles, the default ADS target is changeable live: `set_runtime_target` swaps the
+session default `amsNetId`/`port` (audit-logged, reconnects immediately) and
+`get_runtime_target` reports it. Both reset to the configured `Runtime__AmsNetId` /
+`Runtime__AmsPort` values on server restart.
+
 ## Setup (Windows engineering workstation)
 
 The Automation scope is COM-based and Windows-only; the Runtime scope needs a

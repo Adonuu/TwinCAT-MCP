@@ -31,6 +31,12 @@ public sealed class XaeShellSession : IAsyncDisposable
     private object? _sysManager;
     private string? _openProjectPath;
 
+    // Markers used by ReadLicenseState to recognize the target's renewable 7-day trial license in the
+    // XAE project tree's license node and to flag when it needs a manual renewal (the Beckhoff captcha
+    // flow). Heuristic by design — an unrecognized state never forces a bogus failure.
+    private static readonly string[] TrialLicenseNameMarkers = { "trial", "7 day", "7-day", "7 days", "free day" };
+    private static readonly string[] TrialRenewalRequiredMarkers = { "expired", "expiry", "no valid license", "invalid license", "not available", "not active", "inactive", "please renew", "renewal required", "trial has ended", "no license", "needs to be regenerated" };
+
     public XaeShellSession(StaThreadDispatcher dispatcher, IOptions<AutomationOptions> options, ILogger<XaeShellSession> logger)
     {
         _dispatcher = dispatcher;
@@ -63,7 +69,7 @@ public sealed class XaeShellSession : IAsyncDisposable
             }
 
             var dte = GetOrCreateDte();
-            dte.MainWindow.Visible = _options.ShowIde;
+            RetryIfComBusy(() => dte.MainWindow.Visible = _options.ShowIde);
             RetryIfComBusy(() => dte.Solution.Open(path));
             _openProjectPath = path;
             _sysManager = null; // re-resolved lazily once a project is open — see GetOrCreateSysManager
@@ -164,8 +170,34 @@ public sealed class XaeShellSession : IAsyncDisposable
                 // ITcSysManager::ActivateConfiguration() takes no arguments — it activates the project's
                 // current configuration (the IDE's "Activate Configuration" / "Save to Registry" command).
                 // There is no documented concept of multiple named configurations to choose between.
+                //
+                // The call's S_OK must NOT be taken as "activated": Beckhoff documents it as "the function
+                // returned a value", while the implicit build (and license check) it runs can still abort
+                // the download silently — a failed build or an expired 7-day trial license both come back
+                // as a successful invocation. So after the call we verify the activation actually applied
+                // and report NOT-success (with the reason) when it didn't.
                 var sysManager = GetOrCreateSysManager();
+                var solutionBuild = GetOrCreateDte().Solution.SolutionBuild;
+
+                var licenseBefore = ReadLicenseState(sysManager);
+
                 ComInvoke(sysManager, "ActivateConfiguration");
+
+                var buildAfter = ReadSettledBuildState(solutionBuild, ct);
+                var licenseAfter = ReadLicenseState(sysManager) ?? licenseBefore;
+
+                if (buildAfter.HasErrors)
+                {
+                    return new AutomationOperationResult(Applied: false, Succeeded: false, FormatBuildErrors(buildAfter), safetyReason,
+                        "Configuration was NOT activated — the build the activation ran produced errors. Fix the errors, then run activate_configuration again.");
+                }
+
+                if (licenseAfter is { NeedsRenewal: true })
+                {
+                    return new AutomationOperationResult(Applied: false, Succeeded: false, licenseAfter.Detail, safetyReason,
+                        "Configuration was NOT activated — the target's trial license needs renewal. Complete the Beckhoff license update (captcha) in the XAE Shell, then run activate_configuration again.");
+                }
+
                 return new AutomationOperationResult(Applied: true, Succeeded: true, Error: null, safetyReason, "Activated the project's current configuration.");
             }
             catch (Exception ex)
@@ -514,6 +546,18 @@ public sealed class XaeShellSession : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Snapshot of the IDE's build state: error/warning counts from the error list plus the number of
+    /// projects that failed in the last build (<c>SolutionBuild.LastBuildInfo</c>).
+    /// </summary>
+    private sealed record BuildState(int ErrorCount, int WarningCount, int FailedProjects, IReadOnlyList<BuildErrorInfo> Errors)
+    {
+        public bool HasErrors => ErrorCount > 0 || FailedProjects > 0;
+    }
+
+    /// <summary>Best-effort license-state probe of the target, as far as the XAE project tree reports it.</summary>
+    private sealed record LicenseState(bool NeedsRenewal, string Detail);
+
     private BuildResult RunBuildOperation(bool build, string? configuration)
     {
         var dte = GetOrCreateDte();
@@ -530,6 +574,17 @@ public sealed class XaeShellSession : IAsyncDisposable
         else
             RetryIfComBusy(() => solutionBuild.Clean(true));
 
+        var state = ReadBuildState(solutionBuild);
+        return new BuildResult(Succeeded: !state.HasErrors, state.ErrorCount, state.WarningCount, state.Errors);
+    }
+
+    /// <summary>
+    /// Captures the build state the way build/clean tools report it: errors/warnings from the error list
+    /// plus the number of projects that failed in the last build. Shared by <see cref="RunBuildOperation"/>
+    /// and the post-activation verification in <see cref="ActivateConfigurationAsync"/>.
+    /// </summary>
+    private BuildState ReadBuildState(dynamic solutionBuild)
+    {
         var errors = ReadErrorList();
         var errorCount = errors.Count(e => string.Equals(e.Severity, "Error", StringComparison.OrdinalIgnoreCase));
         var warningCount = errors.Count(e => string.Equals(e.Severity, "Warning", StringComparison.OrdinalIgnoreCase));
@@ -539,7 +594,7 @@ public sealed class XaeShellSession : IAsyncDisposable
         // failed in the last build and lives on the base SolutionBuild interface.
         var failedProjects = TryGetInt(() => Convert.ToInt32(solutionBuild.LastBuildInfo));
 
-        return new BuildResult(Succeeded: errorCount == 0 && failedProjects == 0, errorCount, warningCount, errors);
+        return new BuildState(errorCount, warningCount, failedProjects, errors);
     }
 
     private List<BuildErrorInfo> ReadErrorList()
@@ -588,12 +643,114 @@ public sealed class XaeShellSession : IAsyncDisposable
                     Line: TryGetInt(() => (int)item.Line)));
             }
         }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Could not read the error list from the XAE Shell.");
+catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Could not read the error list from the XAE Shell.");
+            }
+
+            return errors;
         }
 
-        return errors;
+    /// <summary>
+    /// Reads the post-activation build state, letting the shell's error list settle first: although
+    /// <c>ActivateConfiguration</c> is documented synchronous, the IDE reflects the build it ran into
+    /// the error list asynchronously — reading too early could mistake an error-laden path for a clean
+    /// one. Polls until two consecutive reads agree (or a bounded number of attempts elapse).
+    /// </summary>
+    private BuildState ReadSettledBuildState(dynamic solutionBuild, CancellationToken ct, int attempts = 6, int delayMs = 2000)
+    {
+        var current = ReadBuildState(solutionBuild);
+        for (var attempt = 0; attempt < attempts; attempt++)
+        {
+            ct.ThrowIfCancellationRequested();
+            Thread.Sleep(delayMs);
+            var next = ReadBuildState(solutionBuild);
+            if (next.ErrorCount == current.ErrorCount
+                && next.WarningCount == current.WarningCount
+                && next.FailedProjects == current.FailedProjects)
+                return next;
+            current = next;
+        }
+
+        return current;
+    }
+
+    private static string FormatBuildErrors(BuildState state)
+    {
+        var errors = state.Errors
+            .Where(e => string.Equals(e.Severity, "Error", StringComparison.OrdinalIgnoreCase))
+            .Take(5)
+            .Select(e => string.IsNullOrEmpty(e.Project) ? e.Description : $"{e.Description} ({e.Project})")
+            .ToList();
+
+        var detail = errors.Count > 0
+            ? string.Join(" | ", errors)
+            : $"the error list was unreadable, but LastBuildInfo reported {state.FailedProjects} failed project(s)";
+
+        return $"{state.ErrorCount} error(s), {state.FailedProjects} failed project(s) — {detail}";
+    }
+
+    /// <summary>
+    /// Best-effort probe of whether the target needs a trial-license renewal, read from the XAE project
+    /// tree's license node (mirroring <see cref="ListIoDevicesAsync"/>'s defensive shape). Tried at both
+    /// the documented 'TISY' shortcut and the literal 'SYSTEM' path, with both 'License'/'Licenses'
+    /// spellings. Returns <c>null</c> when the state cannot be determined — a license state we cannot read
+    /// is only used to explain a failure, never to fabricate one.
+    /// </summary>
+    private LicenseState? ReadLicenseState(object sysManager)
+    {
+        try
+        {
+            var anyNodeFound = false;
+            var trialCandidates = new List<string>();
+
+            foreach (var licensePath in new[] { "TISY^License", "TISY^Licenses", "SYSTEM^License", "SYSTEM^Licenses" })
+            {
+                if (TryLookupTreeItem(sysManager, licensePath) is not { } licenseNode)
+                    continue;
+
+                anyNodeFound = true;
+                var count = TryGetInt(() => Convert.ToInt32(ComGet(licenseNode, "ChildCount")));
+                for (var i = 1; i <= count; i++)
+                {
+                    if (TryGetComChild(licenseNode, i) is not { } child)
+                        continue;
+
+                    var name = TryGetString(() => (string)ComGet(child, "Name")!) ?? "";
+                    var comment = TryGetString(() => (string)ComGet(child, "Comment")!);
+                    var text = $"{name} {comment}".Trim();
+                    if (TrialLicenseNameMarkers.Any(m => text.Contains(m, StringComparison.OrdinalIgnoreCase)))
+                        trialCandidates.Add(text);
+                }
+            }
+
+            if (trialCandidates.Count > 0)
+            {
+                foreach (var candidate in trialCandidates)
+                {
+                    if (TrialRenewalRequiredMarkers.Any(m => candidate.Contains(m, StringComparison.OrdinalIgnoreCase)))
+                        return new LicenseState(true,
+                            $"The 7-day trial license on the target needs renewal ('{candidate.Trim()}') — Beckhoff requires a manual license update (captcha) in the XAE Shell.");
+                }
+
+                return new LicenseState(false, "Trial license present with no renewal markers detected.");
+            }
+
+            return anyNodeFound
+                ? new LicenseState(false, "No trial-license node found under the license tree; assuming a valid license is installed.")
+                : null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Could not read license state from the XAE project tree.");
+            return null;
+        }
+    }
+
+    private static object? TryGetComChild(object parent, int index)
+    {
+        try { return ComGetIndexed(parent, "Child", index); }
+        catch { return null; }
     }
 
     private static string ErrorLevelToSeverity(int errorLevel) => errorLevel switch
