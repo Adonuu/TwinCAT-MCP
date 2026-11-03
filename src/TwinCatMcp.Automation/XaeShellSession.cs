@@ -9,7 +9,7 @@ using TwinCatMcp.Automation.Models;
 namespace TwinCatMcp.Automation;
 
 /// <summary>
-/// Owns the lifecycle of a single TwinCAT XAE Shell instance, driven through its COM-based Automation
+/// Creates or attaches to a single TwinCAT XAE Shell instance, driven through its COM-based Automation
 /// Interface (<c>DTE</c> + <c>ITcSysManager</c>).
 ///
 /// This is COM late-binding via <c>dynamic</c> rather than a compile-time reference to the <c>EnvDTE</c>/
@@ -30,6 +30,9 @@ public sealed class XaeShellSession : IAsyncDisposable
     private dynamic? _dte;
     private object? _sysManager;
     private string? _openProjectPath;
+    private bool _ownsDte;
+    private XaeShellInstance? _attachedInstance;
+    private readonly Func<IReadOnlyList<RunningXaeShell>> _discoverInstances;
 
     // Markers used by ReadLicenseState to recognize the target's renewable 7-day trial license in the
     // XAE project tree's license node and to flag when it needs a manual renewal (the Beckhoff captcha
@@ -38,17 +41,106 @@ public sealed class XaeShellSession : IAsyncDisposable
     private static readonly string[] TrialRenewalRequiredMarkers = { "expired", "expiry", "no valid license", "invalid license", "not available", "not active", "inactive", "please renew", "renewal required", "trial has ended", "no license", "needs to be regenerated" };
 
     public XaeShellSession(StaThreadDispatcher dispatcher, IOptions<AutomationOptions> options, ILogger<XaeShellSession> logger)
+        : this(dispatcher, options, logger, () => RunningXaeShells.Enumerate(logger))
+    {
+    }
+
+    internal XaeShellSession(StaThreadDispatcher dispatcher, IOptions<AutomationOptions> options,
+        ILogger<XaeShellSession> logger, Func<IReadOnlyList<RunningXaeShell>> discoverInstances)
     {
         _dispatcher = dispatcher;
         _options = options.Value;
         _logger = logger;
+        _discoverInstances = discoverInstances;
+    }
+
+    public Task<IReadOnlyList<XaeShellInstance>> ListXaeShellInstancesAsync(CancellationToken ct) =>
+        RunAsync<IReadOnlyList<XaeShellInstance>>(() =>
+        {
+            ct.ThrowIfCancellationRequested();
+            var instances = _discoverInstances();
+            try { return instances.Select(instance => instance.Info).ToArray(); }
+            finally { foreach (var instance in instances) instance.Dispose(); }
+        });
+
+    public Task<XaeShellConnection> AttachXaeShellAsync(string? instanceId, string? solutionPath, CancellationToken ct) =>
+        RunAsync(() =>
+        {
+            ct.ThrowIfCancellationRequested();
+            if (!string.IsNullOrWhiteSpace(instanceId) && !string.IsNullOrWhiteSpace(solutionPath))
+                throw new ArgumentException("Specify instanceId or solutionPath, not both.");
+
+            var instances = _discoverInstances();
+            try
+            {
+                var matches = instances.Where(candidate =>
+                    !string.IsNullOrWhiteSpace(instanceId)
+                        ? string.Equals(candidate.Info.InstanceId, instanceId, StringComparison.OrdinalIgnoreCase)
+                        : string.IsNullOrWhiteSpace(solutionPath) ||
+                          (candidate.Info.SolutionPath is { } path && string.Equals(Path.GetFullPath(path),
+                              Path.GetFullPath(solutionPath), StringComparison.OrdinalIgnoreCase))).ToArray();
+                if (matches.Length == 0)
+                    throw new InvalidOperationException("No matching running XAE Shell is accessible. Use list_xae_shell_instances; run the server as the same Windows user and at the same elevation as the IDE.");
+                if (matches.Length > 1)
+                    throw new InvalidOperationException("Multiple running XAE Shells match. Select an instanceId from list_xae_shell_instances.");
+                var selected = matches[0];
+                if (_dte is not null)
+                {
+                    if (_attachedInstance?.InstanceId == selected.Info.InstanceId)
+                        return ReadConnection();
+                    throw new InvalidOperationException("An XAE Shell is already connected. Call disconnect_xae_shell before attaching another instance.");
+                }
+
+                _dte = selected.TakeDte();
+                _ownsDte = false;
+                _attachedInstance = selected.Info;
+                _openProjectPath = selected.Info.SolutionPath;
+                _sysManager = null;
+                if (_openProjectPath is { } openPath && Path.GetDirectoryName(Path.GetFullPath(openPath)) is { } directory)
+                    ProjectOpened?.Invoke(directory);
+                return new XaeShellConnection(true, false, _attachedInstance, _openProjectPath);
+            }
+            finally { foreach (var instance in instances) instance.Dispose(); }
+        });
+
+    public Task<XaeShellConnection> GetXaeShellConnectionAsync(CancellationToken ct) =>
+        RunAsync(ReadConnection);
+
+    public Task<XaeShellConnection> DisconnectXaeShellAsync(CancellationToken ct) =>
+        RunAsync(() =>
+        {
+            ct.ThrowIfCancellationRequested();
+            DisconnectCore();
+            return new XaeShellConnection(false, false, null, null);
+        });
+
+    private void RefreshAttachedProject()
+    {
+        if (_attachedInstance is null || _dte is null)
+            return;
+        string path = RetryIfComBusy(() => (string)_dte.Solution.FullName);
+        var current = string.IsNullOrWhiteSpace(path) ? null : path;
+        if (!string.Equals(current, _openProjectPath, StringComparison.OrdinalIgnoreCase))
+        {
+            ReleaseComObject(ref _sysManager);
+            _openProjectPath = current;
+            if (current is not null && Path.GetDirectoryName(Path.GetFullPath(current)) is { } directory)
+                ProjectOpened?.Invoke(directory);
+        }
+        _attachedInstance = _attachedInstance with { SolutionPath = current };
+    }
+
+    private XaeShellConnection ReadConnection()
+    {
+        RefreshAttachedProject();
+        return new XaeShellConnection(_dte is not null, _ownsDte, _attachedInstance, _openProjectPath);
     }
 
     public bool IsProjectOpen => _openProjectPath is not null;
 
     /// <summary>
     /// Raised (on the STA thread) with the opened solution's directory after a successful
-    /// <see cref="OpenProjectAsync"/> — lets the server re-point the file-based source index at the
+    /// open, attach or detected interactive solution change — lets the server re-point the file-based source index at the
     /// project actually being worked on (wired up in Program.cs; Automation doesn't reference Source).
     /// </summary>
     public event Action<string>? ProjectOpened;
@@ -56,6 +148,7 @@ public sealed class XaeShellSession : IAsyncDisposable
     public Task<ProjectInfo> OpenProjectAsync(string path, CancellationToken ct) =>
         RunAsync(() =>
         {
+            RefreshAttachedProject();
             // Idempotency guard: agents occasionally retry open_xae_project while the project is already
             // open (unaware the first open is just slow — see the tool description). Re-running
             // dte.Solution.Open would block on the STA thread for the full load again for zero benefit,
@@ -69,10 +162,11 @@ public sealed class XaeShellSession : IAsyncDisposable
             }
 
             var dte = GetOrCreateDte();
-            RetryIfComBusy(() => dte.MainWindow.Visible = _options.ShowIde);
+            if (_ownsDte)
+                RetryIfComBusy(() => dte.MainWindow.Visible = _options.ShowIde);
             RetryIfComBusy(() => dte.Solution.Open(path));
             _openProjectPath = path;
-            _sysManager = null; // re-resolved lazily once a project is open — see GetOrCreateSysManager
+            ReleaseComObject(ref _sysManager); // re-resolved lazily for the new project
 
             if (Path.GetDirectoryName(Path.GetFullPath(path)) is { Length: > 0 } solutionDir)
                 ProjectOpened?.Invoke(solutionDir);
@@ -84,12 +178,13 @@ public sealed class XaeShellSession : IAsyncDisposable
     public Task<ProjectInfo> CloseProjectAsync(CancellationToken ct) =>
         RunAsync(() =>
         {
+            RefreshAttachedProject();
             if (_dte is { } dte && _openProjectPath is { } path)
             {
                 RetryIfComBusy(() => dte.Solution.Close(SaveFirst: false));
                 var closed = new ProjectInfo(Open: false, path, FullName: null);
                 _openProjectPath = null;
-                _sysManager = null;
+                ReleaseComObject(ref _sysManager);
                 return closed;
             }
 
@@ -97,10 +192,14 @@ public sealed class XaeShellSession : IAsyncDisposable
         });
 
     public Task<ProjectInfo> GetProjectStatusAsync(CancellationToken ct) =>
-        RunAsync(() => new ProjectInfo(
+        RunAsync(() =>
+        {
+            RefreshAttachedProject();
+            return new ProjectInfo(
             Open: _openProjectPath is not null,
             Path: _openProjectPath,
-            FullName: _dte is { } dte && _openProjectPath is not null ? TryGetString(() => (string)dte.Solution.FullName) : null));
+            FullName: _dte is { } dte && _openProjectPath is not null ? TryGetString(() => (string)dte.Solution.FullName) : null);
+        });
 
     public Task<AutomationOperationResult> SaveAllAsync(string safetyReason, CancellationToken ct) =>
         RunAsync(() =>
@@ -763,7 +862,10 @@ catch (Exception ex)
     private dynamic GetOrCreateDte()
     {
         if (_dte is not null)
+        {
+            RefreshAttachedProject();
             return _dte;
+        }
 
         // Guarded at the RunAsync entry point by EnsureSupportedPlatform — every path that reaches here has
         // already confirmed OperatingSystem.IsWindows(), so the platform-compatibility warnings below are
@@ -801,6 +903,7 @@ catch (Exception ex)
         try { dte.SuppressUI = !_options.ShowIde; } catch { /* not all shell versions expose it */ }
 
         _dte = dte;
+        _ownsDte = true;
         return _dte;
     }
 
@@ -862,6 +965,7 @@ catch (Exception ex)
 
     private object GetOrCreateSysManager()
     {
+        RefreshAttachedProject();
         if (_sysManager is not null)
             return _sysManager;
 
@@ -1307,19 +1411,30 @@ catch (Exception ex)
         {
             try
             {
-                ReleaseComObject(ref _sysManager);
-
-                if (_dte is { } dte)
-                {
-                    dte.Quit();
-                    ReleaseComObject(ref _dte);
-                }
+                DisconnectCore();
             }
             catch (Exception ex)
             {
                 _logger.LogDebug(ex, "Ignoring error while shutting down the XAE Shell session.");
             }
         });
+    }
+
+    private void DisconnectCore()
+    {
+        try
+        {
+            ReleaseComObject(ref _sysManager);
+            if (_ownsDte && _dte is { } dte)
+                dte.Quit();
+        }
+        finally
+        {
+            ReleaseComObject(ref _dte);
+            _ownsDte = false;
+            _attachedInstance = null;
+            _openProjectPath = null;
+        }
     }
 
     private static void ReleaseComObject(ref object? comObject)

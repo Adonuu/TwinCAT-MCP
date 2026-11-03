@@ -25,6 +25,30 @@ public static class AutomationTools
 {
     private static readonly JsonSerializerOptions Json = new() { WriteIndented = false };
 
+    [McpServerTool, Description("Lists accessible running 32-bit (TcXaeShell.DTE.15.0) and 64-bit (TcXaeShell.DTE.17.0) XAE Shell instances, " +
+        "including instanceId, process ID, bitness and open solution path. Does not launch an IDE. Windows only; use the same Windows user and elevation as the IDE.")]
+    public static async Task<string> ListXaeShellInstances(XaeShellSession session, CancellationToken cancellationToken = default)
+        => Serialize(await session.ListXaeShellInstancesAsync(cancellationToken));
+
+    [McpServerTool, Description("Attaches automation to an already running 32-bit or 64-bit XAE Shell without reopening its solution or changing its UI. " +
+        "Choose instanceId from list_xae_shell_instances, or an absolute solutionPath. Omit both only when exactly one instance is accessible. " +
+        "Existing automation tools then use this IDE and Source tools follow its solution folder. Disconnect or server shutdown leaves an attached IDE open.")]
+    public static async Task<string> AttachXaeShell(
+        XaeShellSession session,
+        [Description("Exact instanceId (ROT moniker) returned by list_xae_shell_instances. Mutually exclusive with solutionPath.")] string? instanceId = null,
+        [Description("Absolute path of the solution already open in the IDE. Mutually exclusive with instanceId.")] string? solutionPath = null,
+        CancellationToken cancellationToken = default)
+        => Serialize(await session.AttachXaeShellAsync(instanceId, solutionPath, cancellationToken));
+
+    [McpServerTool, Description("Reports the current XAE Shell connection, ownership, attached instance and current solution path without launching an IDE.")]
+    public static async Task<string> GetXaeShellConnection(XaeShellSession session, CancellationToken cancellationToken = default)
+        => Serialize(await session.GetXaeShellConnectionAsync(cancellationToken));
+
+    [McpServerTool, Description("Disconnects XAE automation. An attached IDE and its solution remain open with pending edits intact. " +
+        "An IDE created by this server is quit. Call before switching instances; subsequent open_xae_project can create a new IDE.")]
+    public static async Task<string> DisconnectXaeShell(XaeShellSession session, CancellationToken cancellationToken = default)
+        => Serialize(await session.DisconnectXaeShellAsync(cancellationToken));
+
     [McpServerTool, Description("Opens a TwinCAT XAE project (.sln or .tsproj) in the XAE Shell, ready for build/automation operations. " +
         "Requires Windows with a local TwinCAT XAE Shell install. " +
         "SLOW OPERATION: the first open cold-launches the XAE Shell, then loads the project — normally ~20–30 s, up to ~60 s on a cold shell. " +

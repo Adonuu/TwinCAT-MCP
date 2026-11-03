@@ -41,6 +41,33 @@ session default `amsNetId`/`port` (audit-logged, reconnects immediately) and
 `get_runtime_target` reports it. Both reset to the configured `Runtime__AmsNetId` /
 `Runtime__AmsPort` values on server restart.
 
+## Connect to an already open XAE Shell
+
+The Automation scope can attach to an interactive **32-bit TcXAEShell**
+(`TcXaeShell.DTE.15.0`) or **64-bit TcXAEShell** (`TcXaeShell.DTE.17.0`),
+using the Windows Running Object Table, as IOImporter does. The x64 MCP server
+can attach to either shell through out-of-process COM; no x86 server is needed.
+Run the server as the same Windows user and at the same elevation as the IDE.
+Busy, exiting or inaccessible instances may be omitted from discovery; retry
+discovery when the IDE is ready.
+
+1. Call `list_xae_shell_instances` to get each accessible shell's `InstanceId`,
+   `ProcessId`, `ProgId`, `Bitness` and `SolutionPath` (null for an empty shell).
+2. Call `attach_xae_shell` with `instanceId` from that list, or an absolute
+   `solutionPath`. Omit both only when exactly one instance is accessible.
+   Multiple matches require an explicit instance ID.
+3. Use the existing project, build and tree tools against that IDE. Source tools
+   follow the attached solution's directory. `get_xae_shell_connection` reports
+   the connection and refreshes its current solution path.
+4. Call `disconnect_xae_shell` before selecting another IDE.
+
+Attachment keeps the current solution, pending edits and IDE visibility intact.
+Disconnecting or shutting down the MCP server leaves an attached IDE open.
+`close_project` still explicitly closes its solution **without saving**.
+`open_xae_project` keeps its launch behavior when disconnected; disconnecting
+or shutting down quits an IDE created by the server. Attaching does not change
+the ADS runtime target or safety toggles.
+
 ## Setup (Windows engineering workstation)
 
 The Automation scope is COM-based and Windows-only; the Runtime scope needs a
