@@ -21,7 +21,7 @@ namespace TwinCatMcp.Automation;
 /// Hard Windows-only requirement: <see cref="EnsureSupportedPlatform"/> fails fast with a clear message
 /// everywhere else, so the rest of the server (Source/Runtime tools, which are portable) keeps working.
 /// </summary>
-public sealed class XaeShellSession : IAsyncDisposable
+public sealed partial class XaeShellSession : IAsyncDisposable
 {
     private readonly StaThreadDispatcher _dispatcher;
     private readonly AutomationOptions _options;
@@ -46,12 +46,15 @@ public sealed class XaeShellSession : IAsyncDisposable
     }
 
     internal XaeShellSession(StaThreadDispatcher dispatcher, IOptions<AutomationOptions> options,
-        ILogger<XaeShellSession> logger, Func<IReadOnlyList<RunningXaeShell>> discoverInstances)
+        ILogger<XaeShellSession> logger, Func<IReadOnlyList<RunningXaeShell>> discoverInstances,
+        IConfigurationDispatch? configurationDispatch = null, Func<object>? configurationSystemManager = null)
     {
         _dispatcher = dispatcher;
         _options = options.Value;
         _logger = logger;
         _discoverInstances = discoverInstances;
+        _configurationDispatch = configurationDispatch ?? new NativeConfigurationDispatch();
+        _configurationSystemManager = configurationSystemManager ?? GetOrCreateSysManager;
     }
 
     public Task<IReadOnlyList<XaeShellInstance>> ListXaeShellInstancesAsync(CancellationToken ct) =>
@@ -122,6 +125,7 @@ public sealed class XaeShellSession : IAsyncDisposable
         var current = string.IsNullOrWhiteSpace(path) ? null : path;
         if (!string.Equals(current, _openProjectPath, StringComparison.OrdinalIgnoreCase))
         {
+            _selectedTwinCatProject = null;
             ReleaseComObject(ref _sysManager);
             _openProjectPath = current;
             if (current is not null && Path.GetDirectoryName(Path.GetFullPath(current)) is { } directory)
@@ -166,6 +170,7 @@ public sealed class XaeShellSession : IAsyncDisposable
                 RetryIfComBusy(() => dte.MainWindow.Visible = _options.ShowIde);
             RetryIfComBusy(() => dte.Solution.Open(path));
             _openProjectPath = path;
+            _selectedTwinCatProject = null;
             ReleaseComObject(ref _sysManager); // re-resolved lazily for the new project
 
             if (Path.GetDirectoryName(Path.GetFullPath(path)) is { Length: > 0 } solutionDir)
@@ -184,6 +189,7 @@ public sealed class XaeShellSession : IAsyncDisposable
                 RetryIfComBusy(() => dte.Solution.Close(SaveFirst: false));
                 var closed = new ProjectInfo(Open: false, path, FullName: null);
                 _openProjectPath = null;
+                _selectedTwinCatProject = null;
                 ReleaseComObject(ref _sysManager);
                 return closed;
             }
@@ -977,11 +983,11 @@ catch (Exception ex)
         // The whole resolution retries on COM-busy: right after Solution.Open the shell may still be
         // loading the tsproj in the background and rejects calls — without the retry, a busy
         // rejection inside the probe would be misread as "this project has no sys manager".
-        _sysManager = RetryIfComBusy(() => ResolveSysManager(dte));
+        _sysManager = RetryIfComBusy(() => ResolveSysManager(dte, _selectedTwinCatProject));
         return _sysManager;
     }
 
-    private static object ResolveSysManager(dynamic dte)
+    private static object ResolveSysManager(dynamic dte, string? projectName = null)
     {
         // Prefer the project whose file is the TwinCAT system project (.tsproj) — Projects.Item(1)
         // alone would break the day the solution also contains a non-TwinCAT project.
@@ -992,12 +998,15 @@ catch (Exception ex)
         {
             dynamic candidate = projects.Item(i);
             var fullName = TryGetString(() => (string)candidate.FullName);
-            if (fullName is not null && fullName.EndsWith(".tsproj", StringComparison.OrdinalIgnoreCase))
+            if (fullName is not null && fullName.EndsWith(".tsproj", StringComparison.OrdinalIgnoreCase) &&
+                (projectName is null || string.Equals((string)candidate.Name, projectName, StringComparison.OrdinalIgnoreCase)))
             {
                 tcProject = candidate;
                 break;
             }
         }
+        if (tcProject is null && projectName is not null)
+            throw new InvalidOperationException($"TwinCAT project '{projectName}' is no longer available. Select a project again.");
         tcProject ??= projects.Item(1);
 
         // Beckhoff's documented Automation Interface pattern: the ITcSysManager IS the tsproj
@@ -1203,10 +1212,8 @@ catch (Exception ex)
         // call never started executing, so retrying is safe even for mutating members.
         RetryIfComBusy(() => ComMemberCore(comObject, memberName, invokeFlags, args));
 
-    // If a *dispatch* property ever needs setting (e.g. ITcSmTreeItem.Comment/Disabled, which ARE on
-    // the dual interface), the shape is: invokeFlags = 0x4 (DISPATCH_PROPERTYPUT) and DISPPARAMS must
-    // carry the value as a named arg — allocate 4 bytes, write DISPID_PROPERTYPUT (-3) into it, set
-    // rgdispidNamedArgs to that pointer and cNamedArgs = 1. Do NOT use this for ITcPlcDeclaration/
+    // Dispatch property setters use invokeFlags = 0x4 (DISPATCH_PROPERTYPUT) and the named
+    // DISPID_PROPERTYPUT (-3) argument below. Do NOT use this for ITcPlcDeclaration/
     // ITcPlcImplementation members: those interfaces are raw IUnknown (no dispinterface), and DISPIDs
     // are interface-scoped — invoking a foreign DISPID against the default dispatch interface can
     // silently hit an unrelated member. Use the [ComImport] cast route instead (see those interfaces).
@@ -1218,6 +1225,7 @@ catch (Exception ex)
 
         var argCount = args.Length;
         var variants = argCount > 0 ? Marshal.AllocHGlobal(VariantSize * argCount) : IntPtr.Zero;
+        var namedArgument = IntPtr.Zero;
         try
         {
             // Zero the whole buffer first so that if packing throws partway through, the finally
@@ -1229,7 +1237,12 @@ catch (Exception ex)
             for (var i = 0; i < argCount; i++)
                 Marshal.GetNativeVariantForObject(args[argCount - 1 - i], variants + i * VariantSize);
 
-            var dispParams = new DISPPARAMS { rgvarg = variants, rgdispidNamedArgs = IntPtr.Zero, cArgs = argCount, cNamedArgs = 0 };
+            if ((invokeFlags & 0x4) != 0)
+            {
+                namedArgument = Marshal.AllocHGlobal(sizeof(int));
+                Marshal.WriteInt32(namedArgument, -3); // DISPID_PROPERTYPUT
+            }
+            var dispParams = new DISPPARAMS { rgvarg = variants, rgdispidNamedArgs = namedArgument, cArgs = argCount, cNamedArgs = namedArgument == IntPtr.Zero ? 0 : 1 };
             var iidNull = Guid.Empty;
             var hr = dispatch.Invoke(dispId, ref iidNull, 0, invokeFlags, ref dispParams, out var result, out var excepInfo, out var argErr);
 
@@ -1256,6 +1269,8 @@ catch (Exception ex)
         }
         finally
         {
+            if (namedArgument != IntPtr.Zero)
+                Marshal.FreeHGlobal(namedArgument);
             for (var i = 0; i < argCount; i++)
                 VariantClear(variants + i * VariantSize);
             if (variants != IntPtr.Zero)
@@ -1433,6 +1448,7 @@ catch (Exception ex)
             ReleaseComObject(ref _dte);
             _ownsDte = false;
             _attachedInstance = null;
+            _selectedTwinCatProject = null;
             _openProjectPath = null;
         }
     }

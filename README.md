@@ -70,6 +70,13 @@ the ADS runtime target or safety toggles.
 
 ## Setup (Windows engineering workstation)
 
+The broader engineering tool set supports solution/project creation and selection,
+EtherCAT devices and adapter bindings, ENI import/export, variable mappings,
+real-time tasks and CPU settings, PLC project creation, library references,
+native source imports, compiler checks and boot-project generation.
+See [the automation tool reference](docs/AUTOMATION.md) for tool names, workflows,
+dry-run behavior and verification commands.
+
 The Automation scope is COM-based and Windows-only; the Runtime scope needs a
 reachable ADS target; the Source scope is portable. Running the whole server on the
 engineering workstation (alongside the installed XAE Shell, with a local/loopback
