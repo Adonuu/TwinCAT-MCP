@@ -139,6 +139,14 @@ public sealed class SafetyGateTests : IDisposable
     }
 
     [Fact]
+    public void Boot_project_generation_requires_download_permission()
+    {
+        Assert.Equal(SafetyVerdict.Denied, CreateGate(o => o.AllowAdsWrites = true).CheckAutomationOperation("SetPlcBootProject").Verdict);
+        Assert.Equal(SafetyVerdict.Denied, CreateGate(o => o.AllowRuntimeStateChanges = true).CheckAutomationOperation("SetPlcBootProject").Verdict);
+        Assert.Equal(SafetyVerdict.Allowed, CreateGate(o => o.AllowDownloads = true).CheckAutomationOperation("SetPlcBootProject").Verdict);
+    }
+
+    [Fact]
     public void Every_check_is_recorded_to_the_audit_log()
     {
         var gate = CreateGate(o => o.AllowAdsWrites = true);

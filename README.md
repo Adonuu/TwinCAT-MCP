@@ -41,14 +41,52 @@ session default `amsNetId`/`port` (audit-logged, reconnects immediately) and
 `get_runtime_target` reports it. Both reset to the configured `Runtime__AmsNetId` /
 `Runtime__AmsPort` values on server restart.
 
+## Connect to an already open XAE Shell
+
+The Automation scope can attach to an interactive **32-bit TcXAEShell**
+(`TcXaeShell.DTE.15.0`) or **64-bit TcXAEShell** (`TcXaeShell.DTE.17.0`),
+using the Windows Running Object Table, as IOImporter does. Cross-bitness DTE
+attachment can work, but PLC declaration/implementation access also needs the
+Beckhoff COM interfaces and type libraries registered for the MCP process.
+For legacy 32-bit XAE installations with only 32-bit PLC interface registration,
+publish a `win-x86` server. See [legacy XAE troubleshooting](docs/LEGACY-XAE.md)
+for build commands and missing-type-library diagnostics.
+Run the server as the same Windows user and at the same elevation as the IDE.
+Busy, exiting or inaccessible instances may be omitted from discovery; retry
+discovery when the IDE is ready.
+
+1. Call `list_xae_shell_instances` to get each accessible shell's `InstanceId`,
+   `ProcessId`, `ProgId`, `Bitness` and `SolutionPath` (null for an empty shell).
+2. Call `attach_xae_shell` with `instanceId` from that list, or an absolute
+   `solutionPath`. Omit both only when exactly one instance is accessible.
+   Multiple matches require an explicit instance ID.
+3. Use the existing project, build and tree tools against that IDE. Source tools
+   follow the attached solution's directory. `get_xae_shell_connection` reports
+   the connection and refreshes its current solution path.
+4. Call `disconnect_xae_shell` before selecting another IDE.
+
+Attachment keeps the current solution, pending edits and IDE visibility intact.
+Disconnecting or shutting down the MCP server leaves an attached IDE open.
+`close_project` still explicitly closes its solution **without saving**.
+`open_xae_project` keeps its launch behavior when disconnected; disconnecting
+or shutting down quits an IDE created by the server. Attaching does not change
+the ADS runtime target or safety toggles.
+
 ## Setup (Windows engineering workstation)
+
+The broader engineering tool set supports solution/project creation and selection,
+EtherCAT devices and adapter bindings, ENI import/export, variable mappings,
+real-time tasks and CPU settings, PLC project creation, library references,
+native source imports, compiler checks and boot-project generation.
+See [the automation tool reference](docs/AUTOMATION.md) for tool names, workflows,
+dry-run behavior and verification commands.
 
 The Automation scope is COM-based and Windows-only; the Runtime scope needs a
 reachable ADS target; the Source scope is portable. Running the whole server on the
 engineering workstation (alongside the installed XAE Shell, with a local/loopback
 runtime) is the natural fit for all three at once.
 
-> **Windows only** — the package is built self-contained for `win-x64`. The Automation scope requires TwinCAT XAE Shell (COM/Windows), and the Runtime scope requires a reachable ADS target.
+> **Windows only** — self-contained builds support `win-x64` and `win-x86`. The Automation scope requires TwinCAT XAE Shell (COM/Windows), and the Runtime scope requires a reachable ADS target.
 
 ### Prerequisites
 - **TwinCAT XAE Shell** installed locally, with a local or reachable PLC runtime

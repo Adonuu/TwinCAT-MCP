@@ -33,8 +33,8 @@
     required on the target machine). PackageId below is a placeholder; whoever
     publishes this needs a NuGet.org account and a globally unique id (e.g. "username.TwinCatMcp").
 
-    Self-contained + win-x64-only: this server is Windows-only end to end (the Automation scope
-    drives the XAE Shell over COM — see XaeShellSession), so there's no reason to ship — or ask the
+    Self-contained Windows builds support x64 and x86 (legacy 32-bit XAE interface registration). The Automation scope
+    drives the XAE Shell over COM — see XaeShellSession; there is no reason to ship — or ask the
     end user to provide a runtime for — any other platform.
   -->
   <PropertyGroup>
@@ -45,7 +45,7 @@
     <Version>0.4.2</Version>
     <Description>MCP server for TwinCAT 3 — browse/edit PLC source, read/write live ADS variables, and drive the XAE Shell's build/automation interface.</Description>
     <PublishSelfContained>true</PublishSelfContained>
-    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
+    <RuntimeIdentifiers>win-x64;win-x86</RuntimeIdentifiers>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageProjectUrl>https://github.com/Adonuu/TwinCAT-MCP</PackageProjectUrl>

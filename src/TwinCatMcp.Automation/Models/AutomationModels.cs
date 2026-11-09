@@ -1,5 +1,11 @@
 namespace TwinCatMcp.Automation.Models;
 
+/// <summary>A running shell identified by its exact ROT moniker, including its process ID.</summary>
+public sealed record XaeShellInstance(string InstanceId, string ProgId, int ProcessId, int Bitness, string? SolutionPath);
+
+/// <summary>Whether automation owns the IDE or has borrowed an existing interactive instance.</summary>
+public sealed record XaeShellConnection(bool Connected, bool OwnsInstance, XaeShellInstance? Instance, string? SolutionPath);
+
 /// <summary>Result of opening (or reporting on) the XAE Shell project.</summary>
 public sealed record ProjectInfo(bool Open, string? Path, string? FullName);
 

@@ -9,7 +9,7 @@ using TwinCatMcp.Automation.Models;
 namespace TwinCatMcp.Automation;
 
 /// <summary>
-/// Owns the lifecycle of a single TwinCAT XAE Shell instance, driven through its COM-based Automation
+/// Creates or attaches to a single TwinCAT XAE Shell instance, driven through its COM-based Automation
 /// Interface (<c>DTE</c> + <c>ITcSysManager</c>).
 ///
 /// This is COM late-binding via <c>dynamic</c> rather than a compile-time reference to the <c>EnvDTE</c>/
@@ -21,7 +21,7 @@ namespace TwinCatMcp.Automation;
 /// Hard Windows-only requirement: <see cref="EnsureSupportedPlatform"/> fails fast with a clear message
 /// everywhere else, so the rest of the server (Source/Runtime tools, which are portable) keeps working.
 /// </summary>
-public sealed class XaeShellSession : IAsyncDisposable
+public sealed partial class XaeShellSession : IAsyncDisposable
 {
     private readonly StaThreadDispatcher _dispatcher;
     private readonly AutomationOptions _options;
@@ -30,6 +30,9 @@ public sealed class XaeShellSession : IAsyncDisposable
     private dynamic? _dte;
     private object? _sysManager;
     private string? _openProjectPath;
+    private bool _ownsDte;
+    private XaeShellInstance? _attachedInstance;
+    private readonly Func<IReadOnlyList<RunningXaeShell>> _discoverInstances;
 
     // Markers used by ReadLicenseState to recognize the target's renewable 7-day trial license in the
     // XAE project tree's license node and to flag when it needs a manual renewal (the Beckhoff captcha
@@ -38,17 +41,110 @@ public sealed class XaeShellSession : IAsyncDisposable
     private static readonly string[] TrialRenewalRequiredMarkers = { "expired", "expiry", "no valid license", "invalid license", "not available", "not active", "inactive", "please renew", "renewal required", "trial has ended", "no license", "needs to be regenerated" };
 
     public XaeShellSession(StaThreadDispatcher dispatcher, IOptions<AutomationOptions> options, ILogger<XaeShellSession> logger)
+        : this(dispatcher, options, logger, () => RunningXaeShells.Enumerate(logger))
+    {
+    }
+
+    internal XaeShellSession(StaThreadDispatcher dispatcher, IOptions<AutomationOptions> options,
+        ILogger<XaeShellSession> logger, Func<IReadOnlyList<RunningXaeShell>> discoverInstances,
+        IConfigurationDispatch? configurationDispatch = null, Func<object>? configurationSystemManager = null)
     {
         _dispatcher = dispatcher;
         _options = options.Value;
         _logger = logger;
+        _discoverInstances = discoverInstances;
+        _configurationDispatch = configurationDispatch ?? new NativeConfigurationDispatch();
+        _configurationSystemManager = configurationSystemManager ?? GetOrCreateSysManager;
+    }
+
+    public Task<IReadOnlyList<XaeShellInstance>> ListXaeShellInstancesAsync(CancellationToken ct) =>
+        RunAsync<IReadOnlyList<XaeShellInstance>>(() =>
+        {
+            ct.ThrowIfCancellationRequested();
+            var instances = _discoverInstances();
+            try { return instances.Select(instance => instance.Info).ToArray(); }
+            finally { foreach (var instance in instances) instance.Dispose(); }
+        });
+
+    public Task<XaeShellConnection> AttachXaeShellAsync(string? instanceId, string? solutionPath, CancellationToken ct) =>
+        RunAsync(() =>
+        {
+            ct.ThrowIfCancellationRequested();
+            if (!string.IsNullOrWhiteSpace(instanceId) && !string.IsNullOrWhiteSpace(solutionPath))
+                throw new ArgumentException("Specify instanceId or solutionPath, not both.");
+
+            var instances = _discoverInstances();
+            try
+            {
+                var matches = instances.Where(candidate =>
+                    !string.IsNullOrWhiteSpace(instanceId)
+                        ? string.Equals(candidate.Info.InstanceId, instanceId, StringComparison.OrdinalIgnoreCase)
+                        : string.IsNullOrWhiteSpace(solutionPath) ||
+                          (candidate.Info.SolutionPath is { } path && string.Equals(Path.GetFullPath(path),
+                              Path.GetFullPath(solutionPath), StringComparison.OrdinalIgnoreCase))).ToArray();
+                if (matches.Length == 0)
+                    throw new InvalidOperationException("No matching running XAE Shell is accessible. Use list_xae_shell_instances; run the server as the same Windows user and at the same elevation as the IDE.");
+                if (matches.Length > 1)
+                    throw new InvalidOperationException("Multiple running XAE Shells match. Select an instanceId from list_xae_shell_instances.");
+                var selected = matches[0];
+                if (_dte is not null)
+                {
+                    if (_attachedInstance?.InstanceId == selected.Info.InstanceId)
+                        return ReadConnection();
+                    throw new InvalidOperationException("An XAE Shell is already connected. Call disconnect_xae_shell before attaching another instance.");
+                }
+
+                _dte = selected.TakeDte();
+                _ownsDte = false;
+                _attachedInstance = selected.Info;
+                _openProjectPath = selected.Info.SolutionPath;
+                _sysManager = null;
+                if (_openProjectPath is { } openPath && Path.GetDirectoryName(Path.GetFullPath(openPath)) is { } directory)
+                    ProjectOpened?.Invoke(directory);
+                return new XaeShellConnection(true, false, _attachedInstance, _openProjectPath);
+            }
+            finally { foreach (var instance in instances) instance.Dispose(); }
+        });
+
+    public Task<XaeShellConnection> GetXaeShellConnectionAsync(CancellationToken ct) =>
+        RunAsync(ReadConnection);
+
+    public Task<XaeShellConnection> DisconnectXaeShellAsync(CancellationToken ct) =>
+        RunAsync(() =>
+        {
+            ct.ThrowIfCancellationRequested();
+            DisconnectCore();
+            return new XaeShellConnection(false, false, null, null);
+        });
+
+    private void RefreshAttachedProject()
+    {
+        if (_attachedInstance is null || _dte is null)
+            return;
+        string path = RetryIfComBusy(() => (string)_dte.Solution.FullName);
+        var current = string.IsNullOrWhiteSpace(path) ? null : path;
+        if (!string.Equals(current, _openProjectPath, StringComparison.OrdinalIgnoreCase))
+        {
+            _selectedTwinCatProject = null;
+            ReleaseComObject(ref _sysManager);
+            _openProjectPath = current;
+            if (current is not null && Path.GetDirectoryName(Path.GetFullPath(current)) is { } directory)
+                ProjectOpened?.Invoke(directory);
+        }
+        _attachedInstance = _attachedInstance with { SolutionPath = current };
+    }
+
+    private XaeShellConnection ReadConnection()
+    {
+        RefreshAttachedProject();
+        return new XaeShellConnection(_dte is not null, _ownsDte, _attachedInstance, _openProjectPath);
     }
 
     public bool IsProjectOpen => _openProjectPath is not null;
 
     /// <summary>
     /// Raised (on the STA thread) with the opened solution's directory after a successful
-    /// <see cref="OpenProjectAsync"/> — lets the server re-point the file-based source index at the
+    /// open, attach or detected interactive solution change — lets the server re-point the file-based source index at the
     /// project actually being worked on (wired up in Program.cs; Automation doesn't reference Source).
     /// </summary>
     public event Action<string>? ProjectOpened;
@@ -56,6 +152,7 @@ public sealed class XaeShellSession : IAsyncDisposable
     public Task<ProjectInfo> OpenProjectAsync(string path, CancellationToken ct) =>
         RunAsync(() =>
         {
+            RefreshAttachedProject();
             // Idempotency guard: agents occasionally retry open_xae_project while the project is already
             // open (unaware the first open is just slow — see the tool description). Re-running
             // dte.Solution.Open would block on the STA thread for the full load again for zero benefit,
@@ -69,10 +166,12 @@ public sealed class XaeShellSession : IAsyncDisposable
             }
 
             var dte = GetOrCreateDte();
-            RetryIfComBusy(() => dte.MainWindow.Visible = _options.ShowIde);
+            if (_ownsDte)
+                RetryIfComBusy(() => dte.MainWindow.Visible = _options.ShowIde);
             RetryIfComBusy(() => dte.Solution.Open(path));
             _openProjectPath = path;
-            _sysManager = null; // re-resolved lazily once a project is open — see GetOrCreateSysManager
+            _selectedTwinCatProject = null;
+            ReleaseComObject(ref _sysManager); // re-resolved lazily for the new project
 
             if (Path.GetDirectoryName(Path.GetFullPath(path)) is { Length: > 0 } solutionDir)
                 ProjectOpened?.Invoke(solutionDir);
@@ -84,12 +183,14 @@ public sealed class XaeShellSession : IAsyncDisposable
     public Task<ProjectInfo> CloseProjectAsync(CancellationToken ct) =>
         RunAsync(() =>
         {
+            RefreshAttachedProject();
             if (_dte is { } dte && _openProjectPath is { } path)
             {
                 RetryIfComBusy(() => dte.Solution.Close(SaveFirst: false));
                 var closed = new ProjectInfo(Open: false, path, FullName: null);
                 _openProjectPath = null;
-                _sysManager = null;
+                _selectedTwinCatProject = null;
+                ReleaseComObject(ref _sysManager);
                 return closed;
             }
 
@@ -97,10 +198,14 @@ public sealed class XaeShellSession : IAsyncDisposable
         });
 
     public Task<ProjectInfo> GetProjectStatusAsync(CancellationToken ct) =>
-        RunAsync(() => new ProjectInfo(
+        RunAsync(() =>
+        {
+            RefreshAttachedProject();
+            return new ProjectInfo(
             Open: _openProjectPath is not null,
             Path: _openProjectPath,
-            FullName: _dte is { } dte && _openProjectPath is not null ? TryGetString(() => (string)dte.Solution.FullName) : null));
+            FullName: _dte is { } dte && _openProjectPath is not null ? TryGetString(() => (string)dte.Solution.FullName) : null);
+        });
 
     public Task<AutomationOperationResult> SaveAllAsync(string safetyReason, CancellationToken ct) =>
         RunAsync(() =>
@@ -307,7 +412,7 @@ public sealed class XaeShellSession : IAsyncDisposable
             {
                 var item = ComInvoke(GetOrCreateSysManager(), "LookupTreeItem", treePath)!;
                 var resolvedPath = TryGetString(() => (string)ComGet(item, "PathName")!) ?? treePath;
-                var kind = DescribeSubType(TryGetInt(() => Convert.ToInt32(ComGet(item, "ItemSubType"))));
+                var kind = DescribeItem(item);
                 return new TreePathValidation(Exists: true, resolvedPath, kind, Error: null);
             }
             catch (Exception ex)
@@ -322,7 +427,7 @@ public sealed class XaeShellSession : IAsyncDisposable
             try
             {
                 var item = ComInvoke(GetOrCreateSysManager(), "LookupTreeItem", treePath)!;
-                var kind = DescribeSubType(TryGetInt(() => Convert.ToInt32(ComGet(item, "ItemSubType"))));
+                var kind = DescribeItem(item);
 
                 // The cast/'as' on the RCW is a QueryInterface — it decides what the item supports:
                 // POUs (and their method/property/action children) expose both aspects, GVLs/DUTs only
@@ -334,7 +439,7 @@ public sealed class XaeShellSession : IAsyncDisposable
 
                 if (declaration is null && implementation is null)
                     return new PlcObjectCodeResult(Succeeded: false, treePath, kind, Declaration: null, Implementation: null,
-                        Error: $"'{treePath}' ({kind}) exposes neither a declaration nor an implementation — folders and non-IEC items have no code.");
+                        Error: MissingPlcAspect(treePath, "declaration/implementation"));
 
                 return new PlcObjectCodeResult(Succeeded: true, treePath, kind, declaration, implementation, Error: null);
             }
@@ -355,7 +460,7 @@ public sealed class XaeShellSession : IAsyncDisposable
                 if (!implementation)
                 {
                     if (item is not ITcPlcDeclaration decl)
-                        return Fail($"'{treePath}' has no declaration part — is it a folder?");
+                        return Fail(MissingPlcAspect(treePath, "declaration"));
                     previous = RetryIfComBusy(() => decl.DeclarationText);
                     if (!dryRun)
                         RetryIfComBusy(() => decl.DeclarationText = newText);
@@ -363,7 +468,7 @@ public sealed class XaeShellSession : IAsyncDisposable
                 else
                 {
                     if (item is not ITcPlcImplementation impl)
-                        return Fail($"'{treePath}' has no implementation part — GVLs/DUTs/folders are declaration-only.");
+                        return Fail(MissingPlcAspect(treePath, "implementation (GVLs/DUTs/folders have no executable body)"));
                     previous = RetryIfComBusy(() => impl.ImplementationText);
                     if (!dryRun)
                         RetryIfComBusy(() => impl.ImplementationText = newText);
@@ -481,7 +586,7 @@ public sealed class XaeShellSession : IAsyncDisposable
         // the shell chose (VT_I2 has been observed for ItemSubType) and unboxing a short as int throws.
         var name = TryGetString(() => (string)ComGet(item, "Name")!) ?? "(unknown)";
         var path = TryGetString(() => (string)ComGet(item, "PathName")!) ?? name;
-        var kind = DescribeSubType(TryGetInt(() => Convert.ToInt32(ComGet(item, "ItemSubType"))));
+        var kind = DescribeItem(item);
 
         IReadOnlyList<PlcTreeNode> children = [];
         if (remainingDepth > 0)
@@ -518,6 +623,21 @@ public sealed class XaeShellSession : IAsyncDisposable
         try { return ComInvoke(sysManager, "LookupTreeItem", treePath); }
         catch { return null; } // a miss throws — absence is the expected answer for most nodes
     }
+
+    // IEC objects expose 601/602/.../615 as ItemType; ItemSubType can be zero in 4024.
+    private static string DescribeItem(object item)
+    {
+        var type = TryGetInt(() => Convert.ToInt32(ComGet(item, "ItemType")));
+        return DescribeTreeItemKind(type, TryGetInt(() => Convert.ToInt32(ComGet(item, "ItemSubType"))));
+    }
+
+    internal static string DescribeTreeItemKind(int type, int subType) =>
+        DescribeSubType(type >= 600 && type <= 699 ? type : subType);
+
+    private static string MissingPlcAspect(string treePath, string aspect) =>
+        $"'{treePath}' does not expose its {aspect} COM interface. If this is a valid PLC object, " +
+        $"check COM interface registration and use an MCP process matching XAE bitness. " +
+        $"Current MCP process: {IntPtr.Size * 8}-bit. No source was changed.";
 
     private static string DescribeSubType(int subType) => subType switch
     {
@@ -564,7 +684,19 @@ public sealed class XaeShellSession : IAsyncDisposable
         var solutionBuild = dte.Solution.SolutionBuild;
 
         if (!string.IsNullOrWhiteSpace(configuration))
-            solutionBuild.SolutionConfigurations.Item(configuration).Activate();
+        {
+            // EnvDTE Item(string) accepts a configuration name, not Name|Platform.
+            // Enumerate SolutionConfiguration2 and select both fields before changing state.
+            dynamic configurations = solutionBuild.SolutionConfigurations;
+            var available = new List<(string Name, string Platform)>();
+            for (var i = 1; i <= (int)configurations.Count; i++)
+            {
+                dynamic candidate = configurations.Item(i);
+                available.Add(((string)candidate.Name, (string)candidate.PlatformName));
+            }
+            var index = SolutionConfigurationSelection.Select(configuration, available);
+            configurations.Item(index).Activate();
+        }
 
         // Positional arguments: the wait parameter is named differently per method (Build's is
         // 'WaitForBuildToFinish', Clean's is 'WaitForClean') and a wrong name surfaces as
@@ -763,7 +895,10 @@ catch (Exception ex)
     private dynamic GetOrCreateDte()
     {
         if (_dte is not null)
+        {
+            RefreshAttachedProject();
             return _dte;
+        }
 
         // Guarded at the RunAsync entry point by EnsureSupportedPlatform — every path that reaches here has
         // already confirmed OperatingSystem.IsWindows(), so the platform-compatibility warnings below are
@@ -801,6 +936,7 @@ catch (Exception ex)
         try { dte.SuppressUI = !_options.ShowIde; } catch { /* not all shell versions expose it */ }
 
         _dte = dte;
+        _ownsDte = true;
         return _dte;
     }
 
@@ -862,6 +998,7 @@ catch (Exception ex)
 
     private object GetOrCreateSysManager()
     {
+        RefreshAttachedProject();
         if (_sysManager is not null)
             return _sysManager;
 
@@ -873,11 +1010,11 @@ catch (Exception ex)
         // The whole resolution retries on COM-busy: right after Solution.Open the shell may still be
         // loading the tsproj in the background and rejects calls — without the retry, a busy
         // rejection inside the probe would be misread as "this project has no sys manager".
-        _sysManager = RetryIfComBusy(() => ResolveSysManager(dte));
+        _sysManager = RetryIfComBusy(() => ResolveSysManager(dte, _selectedTwinCatProject));
         return _sysManager;
     }
 
-    private static object ResolveSysManager(dynamic dte)
+    private static object ResolveSysManager(dynamic dte, string? projectName = null)
     {
         // Prefer the project whose file is the TwinCAT system project (.tsproj) — Projects.Item(1)
         // alone would break the day the solution also contains a non-TwinCAT project.
@@ -888,12 +1025,15 @@ catch (Exception ex)
         {
             dynamic candidate = projects.Item(i);
             var fullName = TryGetString(() => (string)candidate.FullName);
-            if (fullName is not null && fullName.EndsWith(".tsproj", StringComparison.OrdinalIgnoreCase))
+            if (fullName is not null && fullName.EndsWith(".tsproj", StringComparison.OrdinalIgnoreCase) &&
+                (projectName is null || string.Equals((string)candidate.Name, projectName, StringComparison.OrdinalIgnoreCase)))
             {
                 tcProject = candidate;
                 break;
             }
         }
+        if (tcProject is null && projectName is not null)
+            throw new InvalidOperationException($"TwinCAT project '{projectName}' is no longer available. Select a project again.");
         tcProject ??= projects.Item(1);
 
         // Beckhoff's documented Automation Interface pattern: the ITcSysManager IS the tsproj
@@ -1099,10 +1239,8 @@ catch (Exception ex)
         // call never started executing, so retrying is safe even for mutating members.
         RetryIfComBusy(() => ComMemberCore(comObject, memberName, invokeFlags, args));
 
-    // If a *dispatch* property ever needs setting (e.g. ITcSmTreeItem.Comment/Disabled, which ARE on
-    // the dual interface), the shape is: invokeFlags = 0x4 (DISPATCH_PROPERTYPUT) and DISPPARAMS must
-    // carry the value as a named arg — allocate 4 bytes, write DISPID_PROPERTYPUT (-3) into it, set
-    // rgdispidNamedArgs to that pointer and cNamedArgs = 1. Do NOT use this for ITcPlcDeclaration/
+    // Dispatch property setters use invokeFlags = 0x4 (DISPATCH_PROPERTYPUT) and the named
+    // DISPID_PROPERTYPUT (-3) argument below. Do NOT use this for ITcPlcDeclaration/
     // ITcPlcImplementation members: those interfaces are raw IUnknown (no dispinterface), and DISPIDs
     // are interface-scoped — invoking a foreign DISPID against the default dispatch interface can
     // silently hit an unrelated member. Use the [ComImport] cast route instead (see those interfaces).
@@ -1114,6 +1252,7 @@ catch (Exception ex)
 
         var argCount = args.Length;
         var variants = argCount > 0 ? Marshal.AllocHGlobal(VariantSize * argCount) : IntPtr.Zero;
+        var namedArgument = IntPtr.Zero;
         try
         {
             // Zero the whole buffer first so that if packing throws partway through, the finally
@@ -1125,7 +1264,12 @@ catch (Exception ex)
             for (var i = 0; i < argCount; i++)
                 Marshal.GetNativeVariantForObject(args[argCount - 1 - i], variants + i * VariantSize);
 
-            var dispParams = new DISPPARAMS { rgvarg = variants, rgdispidNamedArgs = IntPtr.Zero, cArgs = argCount, cNamedArgs = 0 };
+            if ((invokeFlags & 0x4) != 0)
+            {
+                namedArgument = Marshal.AllocHGlobal(sizeof(int));
+                Marshal.WriteInt32(namedArgument, -3); // DISPID_PROPERTYPUT
+            }
+            var dispParams = new DISPPARAMS { rgvarg = variants, rgdispidNamedArgs = namedArgument, cArgs = argCount, cNamedArgs = namedArgument == IntPtr.Zero ? 0 : 1 };
             var iidNull = Guid.Empty;
             var hr = dispatch.Invoke(dispId, ref iidNull, 0, invokeFlags, ref dispParams, out var result, out var excepInfo, out var argErr);
 
@@ -1152,6 +1296,8 @@ catch (Exception ex)
         }
         finally
         {
+            if (namedArgument != IntPtr.Zero)
+                Marshal.FreeHGlobal(namedArgument);
             for (var i = 0; i < argCount; i++)
                 VariantClear(variants + i * VariantSize);
             if (variants != IntPtr.Zero)
@@ -1307,19 +1453,31 @@ catch (Exception ex)
         {
             try
             {
-                ReleaseComObject(ref _sysManager);
-
-                if (_dte is { } dte)
-                {
-                    dte.Quit();
-                    ReleaseComObject(ref _dte);
-                }
+                DisconnectCore();
             }
             catch (Exception ex)
             {
                 _logger.LogDebug(ex, "Ignoring error while shutting down the XAE Shell session.");
             }
         });
+    }
+
+    private void DisconnectCore()
+    {
+        try
+        {
+            ReleaseComObject(ref _sysManager);
+            if (_ownsDte && _dte is { } dte)
+                dte.Quit();
+        }
+        finally
+        {
+            ReleaseComObject(ref _dte);
+            _ownsDte = false;
+            _attachedInstance = null;
+            _selectedTwinCatProject = null;
+            _openProjectPath = null;
+        }
     }
 
     private static void ReleaseComObject(ref object? comObject)

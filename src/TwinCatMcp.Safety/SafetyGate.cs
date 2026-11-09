@@ -84,18 +84,18 @@ public sealed class SafetyGate
     }
 
     /// <summary>
-    /// Gate for an XAE Shell automation operation. Two operation names are covered by the toggles —
-    /// "ActivateConfiguration" (the download) by <see cref="AllowDownloads"/> and "RestartTwinCat" (cold
+    /// Gate for an XAE Shell automation operation. "ActivateConfiguration" and "SetPlcBootProject"
+    /// (downloads) are covered by <see cref="AllowDownloads"/> and "RestartTwinCat" (cold
     /// restart) by <see cref="AllowRuntimeStateChanges"/>. Everything else (build, clean, save, PLC object
     /// create/delete/import/export/write) is audit-only — not gated, just recorded.
     /// </summary>
-    public SafetyDecision CheckAutomationOperation(string operationName)
+    public SafetyDecision CheckAutomationOperation(string operationName, string? subject = null)
     {
         var decision = operationName switch
         {
-            "ActivateConfiguration" when !_options.AllowDownloads =>
-                SafetyDecision.Deny("Configuration download (ActivateConfiguration) is blocked — Safety:AllowDownloads is false. Enable it with set_safety_toggles."),
-            "ActivateConfiguration" =>
+            "ActivateConfiguration" or "SetPlcBootProject" when !_options.AllowDownloads =>
+                SafetyDecision.Deny($"Configuration/boot-project download ({operationName}) is blocked — Safety:AllowDownloads is false. Enable it with set_safety_toggles."),
+            "ActivateConfiguration" or "SetPlcBootProject" =>
                 SafetyDecision.Allow("Permitted — Safety:AllowDownloads is true."),
             "RestartTwinCat" when !_options.AllowRuntimeStateChanges =>
                 SafetyDecision.Deny("Runtime restart (RestartTwinCat) is blocked — Safety:AllowRuntimeStateChanges is false. Enable it with set_safety_toggles."),
@@ -105,7 +105,7 @@ public sealed class SafetyGate
                 SafetyDecision.Allow("Operation is not gated by the toggles — permitted; recorded to the audit log."),
         };
 
-        _audit.Record("Automation", operationName, decision);
+        _audit.Record("Automation", subject is null ? operationName : $"{operationName}: {subject}", decision);
         return decision;
     }
 }

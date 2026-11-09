@@ -23,7 +23,7 @@ Seed the defaults from `appsettings.json` or environment variables (`Safety__All
 | Option | Default | Effect |
 |---|---|---|
 | `AllowAdsWrites` | `false` | Allows `write_symbol` / `write_symbols_batch` — writing live PLC variable values via ADS. |
-| `AllowDownloads` | `false` | Allows `activate_configuration` — downloading/activating a configuration to the runtime, which stops, reloads, and restarts the PLC. |
+| `AllowDownloads` | `false` | Allows `activate_configuration` and `set_plc_boot_project` — configuration activation and writing/activating PLC boot projects on the selected target. |
 | `AllowRuntimeStateChanges` | `false` | Allows `set_plc_state` (Run/Stop/Reset/Config) and `restart_twincat` (cold runtime restart). |
 
 Everything else mutating is **not gated** by this policy: file-based source edits
@@ -43,10 +43,18 @@ They are still **recorded** to the audit log.
 `SafetyGate` evaluates each mutating call against exactly one toggle:
 
 1. `write_symbol` / `write_symbols_batch` → allowed only if `AllowAdsWrites` is on.
-2. `activate_configuration` → allowed only if `AllowDownloads` is on.
+2. `activate_configuration` / `set_plc_boot_project` → allowed only if `AllowDownloads` is on.
 3. `set_plc_state` / `restart_twincat` → allowed only if `AllowRuntimeStateChanges` is on.
 4. Everything else (source edits, build/clean, PLC object create/delete/import/export,
    save) → always allowed.
+
+Engineering configuration tools (project creation/selection, EtherCAT tree and adapter
+edits, ENI import/export, mappings, tasks, CPU project settings and library references)
+are audit-only. They modify the engineering project and require an explicit save to
+persist. They do not download or run `SetOnTarget`. Changing the XAE project's target
+Net ID is separate from changing the MCP ADS target. Every new configuration mutation
+supports `dryRun=true`, which records/evaluates policy without launching the IDE,
+resolving paths, validating input content or changing files. See [AUTOMATION.md](AUTOMATION.md).
 
 Whatever the outcome, every check returns a `SafetyDecision` (`Verdict` + human-readable
 `Reason`) that rides along in the tool's JSON result, and the check is appended to the
