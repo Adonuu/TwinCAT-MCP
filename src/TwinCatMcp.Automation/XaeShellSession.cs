@@ -412,7 +412,7 @@ public sealed partial class XaeShellSession : IAsyncDisposable
             {
                 var item = ComInvoke(GetOrCreateSysManager(), "LookupTreeItem", treePath)!;
                 var resolvedPath = TryGetString(() => (string)ComGet(item, "PathName")!) ?? treePath;
-                var kind = DescribeSubType(TryGetInt(() => Convert.ToInt32(ComGet(item, "ItemSubType"))));
+                var kind = DescribeItem(item);
                 return new TreePathValidation(Exists: true, resolvedPath, kind, Error: null);
             }
             catch (Exception ex)
@@ -427,7 +427,7 @@ public sealed partial class XaeShellSession : IAsyncDisposable
             try
             {
                 var item = ComInvoke(GetOrCreateSysManager(), "LookupTreeItem", treePath)!;
-                var kind = DescribeSubType(TryGetInt(() => Convert.ToInt32(ComGet(item, "ItemSubType"))));
+                var kind = DescribeItem(item);
 
                 // The cast/'as' on the RCW is a QueryInterface — it decides what the item supports:
                 // POUs (and their method/property/action children) expose both aspects, GVLs/DUTs only
@@ -439,7 +439,7 @@ public sealed partial class XaeShellSession : IAsyncDisposable
 
                 if (declaration is null && implementation is null)
                     return new PlcObjectCodeResult(Succeeded: false, treePath, kind, Declaration: null, Implementation: null,
-                        Error: $"'{treePath}' ({kind}) exposes neither a declaration nor an implementation — folders and non-IEC items have no code.");
+                        Error: MissingPlcAspect(treePath, "declaration/implementation"));
 
                 return new PlcObjectCodeResult(Succeeded: true, treePath, kind, declaration, implementation, Error: null);
             }
@@ -460,7 +460,7 @@ public sealed partial class XaeShellSession : IAsyncDisposable
                 if (!implementation)
                 {
                     if (item is not ITcPlcDeclaration decl)
-                        return Fail($"'{treePath}' has no declaration part — is it a folder?");
+                        return Fail(MissingPlcAspect(treePath, "declaration"));
                     previous = RetryIfComBusy(() => decl.DeclarationText);
                     if (!dryRun)
                         RetryIfComBusy(() => decl.DeclarationText = newText);
@@ -468,7 +468,7 @@ public sealed partial class XaeShellSession : IAsyncDisposable
                 else
                 {
                     if (item is not ITcPlcImplementation impl)
-                        return Fail($"'{treePath}' has no implementation part — GVLs/DUTs/folders are declaration-only.");
+                        return Fail(MissingPlcAspect(treePath, "implementation (GVLs/DUTs/folders have no executable body)"));
                     previous = RetryIfComBusy(() => impl.ImplementationText);
                     if (!dryRun)
                         RetryIfComBusy(() => impl.ImplementationText = newText);
@@ -586,7 +586,7 @@ public sealed partial class XaeShellSession : IAsyncDisposable
         // the shell chose (VT_I2 has been observed for ItemSubType) and unboxing a short as int throws.
         var name = TryGetString(() => (string)ComGet(item, "Name")!) ?? "(unknown)";
         var path = TryGetString(() => (string)ComGet(item, "PathName")!) ?? name;
-        var kind = DescribeSubType(TryGetInt(() => Convert.ToInt32(ComGet(item, "ItemSubType"))));
+        var kind = DescribeItem(item);
 
         IReadOnlyList<PlcTreeNode> children = [];
         if (remainingDepth > 0)
@@ -623,6 +623,21 @@ public sealed partial class XaeShellSession : IAsyncDisposable
         try { return ComInvoke(sysManager, "LookupTreeItem", treePath); }
         catch { return null; } // a miss throws — absence is the expected answer for most nodes
     }
+
+    // IEC objects expose 601/602/.../615 as ItemType; ItemSubType can be zero in 4024.
+    private static string DescribeItem(object item)
+    {
+        var type = TryGetInt(() => Convert.ToInt32(ComGet(item, "ItemType")));
+        return DescribeTreeItemKind(type, TryGetInt(() => Convert.ToInt32(ComGet(item, "ItemSubType"))));
+    }
+
+    internal static string DescribeTreeItemKind(int type, int subType) =>
+        DescribeSubType(type >= 600 && type <= 699 ? type : subType);
+
+    private static string MissingPlcAspect(string treePath, string aspect) =>
+        $"'{treePath}' does not expose its {aspect} COM interface. If this is a valid PLC object, " +
+        $"check COM interface registration and use an MCP process matching XAE bitness. " +
+        $"Current MCP process: {IntPtr.Size * 8}-bit. No source was changed.";
 
     private static string DescribeSubType(int subType) => subType switch
     {
@@ -669,7 +684,19 @@ public sealed partial class XaeShellSession : IAsyncDisposable
         var solutionBuild = dte.Solution.SolutionBuild;
 
         if (!string.IsNullOrWhiteSpace(configuration))
-            solutionBuild.SolutionConfigurations.Item(configuration).Activate();
+        {
+            // EnvDTE Item(string) accepts a configuration name, not Name|Platform.
+            // Enumerate SolutionConfiguration2 and select both fields before changing state.
+            dynamic configurations = solutionBuild.SolutionConfigurations;
+            var available = new List<(string Name, string Platform)>();
+            for (var i = 1; i <= (int)configurations.Count; i++)
+            {
+                dynamic candidate = configurations.Item(i);
+                available.Add(((string)candidate.Name, (string)candidate.PlatformName));
+            }
+            var index = SolutionConfigurationSelection.Select(configuration, available);
+            configurations.Item(index).Activate();
+        }
 
         // Positional arguments: the wait parameter is named differently per method (Build's is
         // 'WaitForBuildToFinish', Clean's is 'WaitForClean') and a wrong name surfaces as

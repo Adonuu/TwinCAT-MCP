@@ -45,8 +45,12 @@ session default `amsNetId`/`port` (audit-logged, reconnects immediately) and
 
 The Automation scope can attach to an interactive **32-bit TcXAEShell**
 (`TcXaeShell.DTE.15.0`) or **64-bit TcXAEShell** (`TcXaeShell.DTE.17.0`),
-using the Windows Running Object Table, as IOImporter does. The x64 MCP server
-can attach to either shell through out-of-process COM; no x86 server is needed.
+using the Windows Running Object Table, as IOImporter does. Cross-bitness DTE
+attachment can work, but PLC declaration/implementation access also needs the
+Beckhoff COM interfaces and type libraries registered for the MCP process.
+For legacy 32-bit XAE installations with only 32-bit PLC interface registration,
+publish a `win-x86` server. See [legacy XAE troubleshooting](docs/LEGACY-XAE.md)
+for build commands and missing-type-library diagnostics.
 Run the server as the same Windows user and at the same elevation as the IDE.
 Busy, exiting or inaccessible instances may be omitted from discovery; retry
 discovery when the IDE is ready.
@@ -82,7 +86,7 @@ reachable ADS target; the Source scope is portable. Running the whole server on 
 engineering workstation (alongside the installed XAE Shell, with a local/loopback
 runtime) is the natural fit for all three at once.
 
-> **Windows only** — the package is built self-contained for `win-x64`. The Automation scope requires TwinCAT XAE Shell (COM/Windows), and the Runtime scope requires a reachable ADS target.
+> **Windows only** — self-contained builds support `win-x64` and `win-x86`. The Automation scope requires TwinCAT XAE Shell (COM/Windows), and the Runtime scope requires a reachable ADS target.
 
 ### Prerequisites
 - **TwinCAT XAE Shell** installed locally, with a local or reachable PLC runtime
